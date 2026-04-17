@@ -475,11 +475,18 @@ class ContainerService:
         Returns:
             True if successful
         """
-        if instance.status not in ('running', 'provisioning'):
+        active_states = ('running', 'provisioning', 'stopping', 'error')
+        terminal_states = ('stopped', 'solved')
+
+        # Idempotent stop: treat already-terminal instances as success.
+        if instance.status in terminal_states:
+            return True
+        if instance.status not in active_states:
             return False
-        
-        instance.status = 'stopping'
-        db.session.commit()
+
+        if instance.status != 'stopping':
+            instance.status = 'stopping'
+            db.session.commit()
         
         # Cancel Redis expiration
         try:
@@ -566,27 +573,9 @@ class ContainerService:
         self._cleanup_running = True
         
         try:
-            import signal
-            from contextlib import contextmanager
-            
-            @contextmanager
-            def timeout(seconds):
-                """Timeout context manager"""
-                def timeout_handler(signum, frame):
-                    raise TimeoutError(f"Operation timed out after {seconds}s")
-                
-                # Set alarm (Unix only)
-                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(seconds)
-                try:
-                    yield
-                finally:
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old_handler)
-            
             # Get expired instances (limit to 50 per run to prevent overload)
             expired = ContainerInstance.query.filter(
-                ContainerInstance.status == 'running',
+                ContainerInstance.status.in_(['running', 'provisioning']),
                 ContainerInstance.expires_at < datetime.utcnow()
             ).limit(50).all()
             
@@ -600,17 +589,12 @@ class ContainerService:
             
             for instance in expired:
                 try:
-                    # Timeout after 10 seconds per container
-                    with timeout(10):
-                        logger.warning(f"🟡 [APSCHEDULER KILL] Cleaning up expired instance {instance.uuid}")
-                        self.stop_instance(instance, user_id=None, reason='expired')
+                    logger.warning(f"🟡 [APSCHEDULER KILL] Cleaning up expired instance {instance.uuid}")
+                    success = self.stop_instance(instance, user_id=None, reason='expired')
+                    if success:
                         cleaned += 1
-                except TimeoutError:
-                    logger.error(f"Timeout cleaning up instance {instance.uuid}")
-                    # Mark as error so it gets cleaned up later
-                    instance.status = 'error'
-                    db.session.commit()
-                    failed += 1
+                    else:
+                        failed += 1
                 except Exception as e:
                     logger.error(f"Error cleaning up instance {instance.uuid}: {e}")
                     failed += 1

@@ -37,6 +37,41 @@ function mergeQueryParams(parameters, queryParameters) {
     return queryParameters;
 }
 
+var expiryTickerInterval = null;
+var expiryResyncTriggered = false;
+var containerRequestInFlight = false;
+
+function clearExpiryTicker() {
+    if (expiryTickerInterval) {
+        clearInterval(expiryTickerInterval);
+        expiryTickerInterval = null;
+    }
+}
+
+function attachExpiryTicker(challenge_id, timestampMs, expiryElement) {
+    clearExpiryTicker();
+    expiryResyncTriggered = false;
+
+    const tick = function () {
+        expiryElement.textContent = formatExpiry(timestampMs);
+
+        if (Date.now() >= timestampMs) {
+            hideChallengeUpdate();
+            toggleChallengeCreate();
+            clearExpiryTicker();
+
+            // Re-fetch immediately so UI and server state reconcile at expiry boundary.
+            if (!expiryResyncTriggered) {
+                expiryResyncTriggered = true;
+                view_container_info(challenge_id);
+            }
+        }
+    };
+
+    tick();
+    expiryTickerInterval = setInterval(tick, 1000);
+}
+
 function resetAlert() {
     let alert = document.getElementById("deployment-info");
     alert.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
@@ -85,17 +120,18 @@ function hideChallengeUpdate() {
 }
 
 function calculateExpiry(date) {
-    return Math.ceil((new Date(date * 1000) - new Date()) / 1000 / 60);
+    return Math.floor((new Date(date * 1000) - new Date()) / 1000 / 60);
 }
 
 function formatExpiry(timestampMs) {
-    const secondsLeft = Math.ceil((timestampMs - Date.now()) / 1000);
+    const secondsLeft = Math.floor((timestampMs - Date.now()) / 1000);
     if (secondsLeft < 0) {
         return "Expired";
     } else if (secondsLeft < 60) {
         return "Expires in " + secondsLeft + " seconds";
     } else {
-        const minutesLeft = Math.ceil(secondsLeft / 60);
+        // Use floor so 60-119 seconds displays as 1 minute (no 2->1 flicker).
+        const minutesLeft = Math.max(1, Math.floor(secondsLeft / 60));
         return "Expires in " + minutesLeft + " minutes";
     }
 }
@@ -137,20 +173,23 @@ function view_container_info(challenge_id) {
             alert.innerHTML = ""; // Remove spinner
 
             if (data.status == "not_found") {
+                clearExpiryTicker();
                 alert.innerHTML = "No active instance. Click 'Fetch Instance' to start.";
                 hideChallengeUpdate();
                 toggleChallengeCreate();
             } else if (data.status == "running" || data.status == "provisioning") {
                 // Show connection info
                 let expires = document.createElement('span');
-                expires.textContent = formatExpiry(data.expires_at);
+                expires.id = "deployment-expiry";
                 alert.append(expires, document.createElement('br'));
+                attachExpiryTicker(challenge_id, data.expires_at, expires);
 
                 // Display connection info based on type
                 renderConnectionInfo(data.connection, alert);
                 hideChallengeCreate();
                 toggleChallengeUpdate();
             } else {
+                clearExpiryTicker();
                 alert.innerHTML = data.error || "Unknown status";
                 alert.classList.add("alert-danger");
                 hideChallengeUpdate();
@@ -167,6 +206,11 @@ function view_container_info(challenge_id) {
 }
 
 function container_request(challenge_id) {
+    if (containerRequestInFlight) {
+        return;
+    }
+    containerRequestInFlight = true;
+
     let alert = resetAlert();
 
     fetch("/api/v1/containers/request", {
@@ -178,18 +222,39 @@ function container_request(challenge_id) {
         },
         body: JSON.stringify({ challenge_id: challenge_id })
     })
-        .then(response => response.json())
+        .then(async response => {
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (e) {
+                // Some 429 responses may not be JSON; keep data as empty object.
+            }
+
+            if (!response.ok) {
+                let message = data.error || data.message;
+                if (!message && response.status === 429) {
+                    message = "Too many requests. Please wait a few seconds and try again.";
+                }
+                if (!message) {
+                    message = "Error requesting container.";
+                }
+                throw new Error(message);
+            }
+
+            return data;
+        })
         .then(data => {
             alert.innerHTML = ""; // Remove spinner
-            if (data.error) {
-                alert.innerHTML = data.error;
+            if (data.error || !data.connection || !data.expires_at) {
+                alert.innerHTML = data.error || "Invalid server response. Please try again.";
                 alert.classList.add("alert-danger");
                 toggleChallengeCreate();
             } else {
                 // Show connection info
                 let expires = document.createElement('span');
-                expires.textContent = formatExpiry(data.expires_at);
+                expires.id = "deployment-expiry";
                 alert.append(expires, document.createElement('br'));
+                attachExpiryTicker(challenge_id, data.expires_at, expires);
 
                 // Display connection info based on type
                 renderConnectionInfo(data.connection, alert);
@@ -199,10 +264,14 @@ function container_request(challenge_id) {
         })
         .catch(error => {
             console.error("[Container] Request error:", error);
-            alert.innerHTML = "Error requesting container.";
+            alert.innerHTML = error && error.message ? error.message : "Error requesting container.";
             alert.classList.add("alert-danger");
+            toggleChallengeCreate();
         })
-        .finally(enableButtons);
+        .finally(function () {
+            containerRequestInFlight = false;
+            enableButtons();
+        });
 }
 
 function container_renew(challenge_id) {
@@ -255,6 +324,7 @@ function container_stop(challenge_id) {
                 alert.innerHTML = data.error;
                 alert.classList.add("alert-danger");
             } else {
+                clearExpiryTicker();
                 alert.innerHTML = "Instance terminated successfully.";
                 hideChallengeUpdate();
                 toggleChallengeCreate();
@@ -405,6 +475,13 @@ function container_stop(challenge_id) {
 })();
 
 function renderConnectionInfo(connection, parent) {
+    if (!connection || typeof connection !== "object") {
+        let info = document.createElement('small');
+        info.textContent = 'Connection details are not ready yet. Please refresh in a moment.';
+        parent.append(info);
+        return;
+    }
+
     // Prioritize URL List (Multi-port Subdomain)
     if (connection.type == "url_list" && connection.urls) {
         connection.urls.forEach(function (item) {
@@ -437,7 +514,7 @@ function renderConnectionInfo(connection, parent) {
             for (let internal in connection.ports) {
                 let external = connection.ports[internal];
                 let code = document.createElement('code');
-                code.textContent = 'ssh -p ' + external + ' user@' + connection.host;
+                code.textContent = 'ssh -p ' + external + ' <username>@' + connection.host;
                 parent.append(code, document.createElement('br'));
             }
         } else {
@@ -457,7 +534,7 @@ function renderConnectionInfo(connection, parent) {
             parent.append(codeElement);
         } else if (connection.type == "ssh") {
             let codeElement = document.createElement('code');
-            codeElement.textContent = 'ssh -p ' + connection.port + ' user@' + connection.host;
+            codeElement.textContent = 'ssh -p ' + connection.port + ' <username>@' + connection.host;
             parent.append(codeElement);
         } else if (connection.type == "url") {
             let link = document.createElement('a');

@@ -16,6 +16,9 @@ from ..models.challenge import ContainerChallenge
 
 user_bp = Blueprint('containers_user', __name__, url_prefix='/api/v1/containers')
 
+ACTIVE_INSTANCE_STATES = ('running', 'provisioning', 'stopping', 'error')
+RUNNING_LIKE_STATES = ('running', 'provisioning')
+
 # Global services (will be injected by plugin init)
 container_service = None
 flag_service = None
@@ -97,9 +100,14 @@ def request_container():
             challenge_id=challenge_id,
             account_id=account_id
         ).filter(
-            ContainerInstance.status.in_(['running', 'provisioning'])
+            ContainerInstance.status.in_(RUNNING_LIKE_STATES)
         ).first()
         
+        # Self-heal stale expired records so users can fetch a new instance immediately.
+        if existing and existing.is_expired():
+            container_service.stop_instance(existing, user.id, reason='expired')
+            existing = None
+
         if existing and not existing.is_expired():
             # Return existing instance
             return jsonify({
@@ -124,10 +132,30 @@ def request_container():
         running_count = ContainerInstance.query.filter_by(
             account_id=account_id
         ).filter(
-            ContainerInstance.status.in_(['running', 'provisioning'])
+            ContainerInstance.status.in_(['running', 'provisioning']),
+            ContainerInstance.expires_at > db.func.now()
         ).count()
         
         if running_count >= max_containers:
+            if max_containers == 1:
+                active_instance = ContainerInstance.query.filter_by(
+                    account_id=account_id
+                ).filter(
+                    ContainerInstance.status.in_(['running', 'provisioning']),
+                    ContainerInstance.expires_at > db.func.now()
+                ).order_by(ContainerInstance.created_at.desc()).first()
+
+                active_name = 'active containers'
+                if active_instance:
+                    if active_instance.challenge and getattr(active_instance.challenge, 'name', None):
+                        active_name = active_instance.challenge.name
+                    elif getattr(active_instance, 'challenge_id', None):
+                        active_name = f'Challenge #{active_instance.challenge_id}'
+
+                return jsonify({
+                    'error': f'You have one container running already. Stop "{active_name}" before starting another challenge.'
+                }), 403
+
             return jsonify({
                 'error': f'You have reached the maximum number of concurrent containers ({max_containers})'
             }), 403
@@ -181,10 +209,15 @@ def get_container_info(challenge_id):
             challenge_id=challenge_id,
             account_id=account_id
         ).filter(
-            ContainerInstance.status.in_(['running', 'provisioning'])
+            ContainerInstance.status.in_(RUNNING_LIKE_STATES)
         ).first()
         
-        if not instance or instance.is_expired():
+        if instance and instance.is_expired():
+            # Keep DB/container state consistent once the client sees expiration.
+            container_service.stop_instance(instance, user_id=None, reason='expired')
+            return jsonify({'status': 'not_found'})
+
+        if not instance:
             return jsonify({'status': 'not_found'})
         
         # Update last accessed
@@ -293,12 +326,14 @@ def stop_container():
         
         instance = ContainerInstance.query.filter_by(
             challenge_id=challenge_id,
-            account_id=account_id,
-            status='running'
-        ).first()
+            account_id=account_id
+        ).filter(
+            ContainerInstance.status.in_(ACTIVE_INSTANCE_STATES)
+        ).order_by(ContainerInstance.created_at.desc()).first()
         
         if not instance:
-            return jsonify({'error': 'No running container found'}), 404
+            # Idempotent success: if there is no active instance, terminate is already complete.
+            return jsonify({'success': True, 'status': 'already_stopped'})
         
         success = container_service.stop_instance(instance, user.id, reason='manual')
         

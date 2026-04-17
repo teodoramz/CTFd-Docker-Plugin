@@ -71,8 +71,8 @@ class ContainerChallenge(Challenges):
         db.String(20), 
         default="random"
     )  # "random" or "static"
-    flag_prefix = db.Column(db.String(50), default="CTF{")
-    flag_suffix = db.Column(db.String(50), default="}")
+    flag_prefix = db.Column(db.String(1024), default="CTF{")
+    flag_suffix = db.Column(db.String(1024), default="}")
     random_flag_length = db.Column(db.Integer, default=16)
     
     # Dynamic scoring (like CTFd dynamic challenges)
@@ -81,6 +81,39 @@ class ContainerChallenge(Challenges):
     container_decay = db.Column(db.Integer, default=20, name="decay")
     decay_function = db.Column(db.String(32), default="logarithmic")  # linear or logarithmic
     
+    
+    @property
+    def container_initial(self):
+        return self.initial
+
+    @container_initial.setter
+    def container_initial(self, value):
+        self.initial = value
+
+    @property
+    def container_decay(self):
+        return self.decay
+
+    @container_decay.setter
+    def container_decay(self, value):
+        self.decay = value
+
+    @property
+    def container_minimum(self):
+        return self.minimum
+
+    @container_minimum.setter
+    def container_minimum(self, value):
+        self.minimum = value
+
+    @property
+    def decay_function(self):
+        return getattr(self, 'function', 'logarithmic')
+
+    @decay_function.setter
+    def decay_function(self, value):
+        self.function = value
+
     def __init__(self, *args, **kwargs):
         super(ContainerChallenge, self).__init__(**kwargs)
         # Set initial value

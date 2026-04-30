@@ -245,8 +245,8 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     } 
     else {
-        // Pre-fill the "SSH Gold Standard" defaults for convenience
-        const defaultSshCaps = ['CHOWN', 'SETUID', 'SETGID', 'SYS_CHROOT', 'AUDIT_WRITE', 'DAC_READ_SEARCH'];
+        // Pre-fill the ssh defaults for convenience
+        const defaultSshCaps = ['CHOWN', 'SETUID', 'SETGID', 'SYS_CHROOT', 'AUDIT_WRITE'];
         capCheckboxes.forEach(cb => {
             if (defaultSshCaps.includes(cb.value)) cb.checked = true;
         });

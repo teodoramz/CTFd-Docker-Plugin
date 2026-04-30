@@ -22,6 +22,10 @@ class ContainerChallenge(Challenges):
     internal_port = db.Column(db.Integer, nullable=False, default=22)
     internal_ports = db.Column(db.Text, default="")  # Comma separated list of ports: "80,22"
     command = db.Column(db.Text, default="")
+
+    capabilities = db.Column(db.Text, default="")
+    drop_all_caps = db.Column(db.Boolean, default=True)
+    no_new_privileges = db.Column(db.Boolean, default=True)
     
     # Connection info for users
     container_connection_type = db.Column(

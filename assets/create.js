@@ -218,3 +218,61 @@ CTFd.plugin.run((_CTFd) => {
     
     // console.log(('[Container Plugin] Plugin initialization complete!');
 });
+
+// ============================================================================
+// SECURITY & CAPABILITIES LOGIC
+// ============================================================================
+document.addEventListener('DOMContentLoaded', function () {
+    const dropAllCapsUI = document.getElementById('ui_drop_all_caps');
+    const noNewPrivsUI = document.getElementById('ui_no_new_privileges');
+    const dropAllCapsHidden = document.getElementById('drop_all_caps_hidden');
+    const noNewPrivsHidden = document.getElementById('no_new_privileges_hidden');
+    const capabilitiesHidden = document.getElementById('capabilities_hidden');
+    const capCheckboxes = document.querySelectorAll('.cap-checkbox');
+
+    if (typeof challenge !== 'undefined' && challenge.id) {
+        dropAllCapsUI.checked = challenge.drop_all_caps !== false; 
+        noNewPrivsUI.checked = challenge.no_new_privileges !== false;
+        
+        dropAllCapsHidden.value = dropAllCapsUI.checked ? "true" : "false";
+        noNewPrivsHidden.value = noNewPrivsUI.checked ? "true" : "false";
+
+        if (capabilitiesHidden && capabilitiesHidden.value) {
+            const savedCaps = capabilitiesHidden.value.split(',').map(c => c.trim());
+            capCheckboxes.forEach(cb => {
+                if (savedCaps.includes(cb.value)) cb.checked = true;
+            });
+        }
+    } 
+    else {
+        // Pre-fill the "SSH Gold Standard" defaults for convenience
+        const defaultSshCaps = ['CHOWN', 'SETUID', 'SETGID', 'SYS_CHROOT', 'AUDIT_WRITE', 'DAC_READ_SEARCH'];
+        capCheckboxes.forEach(cb => {
+            if (defaultSshCaps.includes(cb.value)) cb.checked = true;
+        });
+        if (capabilitiesHidden) {
+            capabilitiesHidden.value = defaultSshCaps.join(',');
+        }
+    }
+    
+    if (dropAllCapsUI) {
+        dropAllCapsUI.addEventListener('change', (e) => { 
+            dropAllCapsHidden.value = e.target.checked ? "true" : "false"; 
+        });
+    }
+    
+    if (noNewPrivsUI) {
+        noNewPrivsUI.addEventListener('change', (e) => { 
+            noNewPrivsHidden.value = e.target.checked ? "true" : "false"; 
+        });
+    }
+
+    capCheckboxes.forEach(cb => {
+        cb.addEventListener('change', function() {
+            const selected = Array.from(capCheckboxes).filter(i => i.checked).map(i => i.value);
+            if (capabilitiesHidden) {
+                capabilitiesHidden.value = selected.join(',');
+            }
+        });
+    });
+});

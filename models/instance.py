@@ -4,6 +4,37 @@ Container Instance Model - Tracks running/stopped containers
 import uuid
 from datetime import datetime, timedelta
 from CTFd.models import db
+import sqlalchemy.types as types
+
+
+class SafeDateTime(types.TypeDecorator):
+    """
+    Custom SQLAlchemy type to guarantee strings from DB imports 
+    are always converted back into Python datetime objects.
+    """
+    impl = types.DateTime
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                # 1. Try standard SQL format
+                if '.' in value:
+                    return datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
+                return datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                try:
+                    # 2. Try ISO format (from CTFd JSON imports)
+                    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+                except ValueError:
+                    # 3. Bruteforce fallback cleanup
+                    clean_str = value.split('.')[0].replace('T', ' ')
+                    return datetime.strptime(clean_str, '%Y-%m-%d %H:%M:%S')
+        return value
 
 
 class ContainerInstance(db.Model):
@@ -57,13 +88,13 @@ class ContainerInstance(db.Model):
         index=True
     )
     
-    # Timestamps
-    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    started_at = db.Column(db.DateTime)  # Khi container actually started
-    expires_at = db.Column(db.DateTime, nullable=False, index=True)
-    stopped_at = db.Column(db.DateTime)
-    solved_at = db.Column(db.DateTime)
-    last_accessed_at = db.Column(db.DateTime, default=datetime.utcnow)
+    # Timestamps (Replaced db.DateTime with SafeDateTime)
+    created_at = db.Column(SafeDateTime, nullable=False, default=datetime.utcnow)
+    started_at = db.Column(SafeDateTime)  # Khi container actually started
+    expires_at = db.Column(SafeDateTime, nullable=False, index=True)
+    stopped_at = db.Column(SafeDateTime)
+    solved_at = db.Column(SafeDateTime)
+    last_accessed_at = db.Column(SafeDateTime, default=datetime.utcnow)
     
     # Renewal tracking
     renewal_count = db.Column(db.Integer, default=0)

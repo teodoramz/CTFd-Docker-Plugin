@@ -97,6 +97,13 @@ class ContainerChallengeType(BaseChallenge):
             mapped_key = field_mapping.get(key, key)
             mapped_data[mapped_key] = value
         
+        # Convert types for specific fields (Security Capabilities)
+        if 'drop_all_caps' in mapped_data:
+            mapped_data['drop_all_caps'] = str(mapped_data['drop_all_caps']).lower() in ['true', '1', 'yes']
+        if 'no_new_privileges' in mapped_data:
+            mapped_data['no_new_privileges'] = str(mapped_data['no_new_privileges']).lower() in ['true', '1', 'yes']
+        # ==========================================
+        
         # Create challenge with mapped data
         challenge = cls.challenge_model(**mapped_data)
         
@@ -210,6 +217,9 @@ class ContainerChallengeType(BaseChallenge):
                 value = float(value)
             elif db_attr in ('internal_port', 'timeout_minutes', 'max_renewals', 'random_flag_length', 'pids_limit'):
                 value = int(value)
+            # Security capabilities should be stored as booleans
+            elif db_attr in ('drop_all_caps', 'no_new_privileges'):
+                value = str(value).lower() in ['true', '1', 'yes']
             
             setattr(challenge, db_attr, value)
         

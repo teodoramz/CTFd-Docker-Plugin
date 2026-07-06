@@ -134,6 +134,57 @@
 	<input type="text" class="form-control" name="command" placeholder="/bin/bash -c 'your command'">
 </div>
 
+<!-- Capability Configuration -->
+<div class="form-group pt-3 border-top mt-4">
+    <h4>Security & Privileges</h4>
+    
+    <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="ui_drop_all_caps" checked>
+        <label class="form-check-label font-weight-bold" for="ui_drop_all_caps">Drop ALL default capabilities</label>
+        <small class="form-text text-muted">Strips all default Docker privileges. Highly recommended.</small>
+    </div>
+
+    <div class="form-check mb-4">
+        <input class="form-check-input" type="checkbox" id="ui_no_new_privileges" checked>
+        <label class="form-check-label font-weight-bold" for="ui_no_new_privileges">Prevent New Privileges (no-new-privileges)</label>
+        <small class="form-text text-muted">Prevents binaries from gaining new privileges using SUID bits.</small>
+    </div>
+
+    <label class="font-weight-bold mb-2">Grant Specific Capabilities (cap_add)</label>
+    <div class="capabilities-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; background: #f8f9fa; padding: 15px; border-radius: 5px;">
+        
+        <div>
+            <strong style="color: #6c757d;">SSH Defaults / Files</strong>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="CHOWN" id="cap_chown"><label for="cap_chown">CHOWN</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SETUID" id="cap_setuid"><label for="cap_setuid">SETUID</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SETGID" id="cap_setgid"><label for="cap_setgid">SETGID</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SYS_CHROOT" id="cap_chroot"><label for="cap_chroot">SYS_CHROOT</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="AUDIT_WRITE" id="cap_audit"><label for="cap_audit">AUDIT_WRITE</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="DAC_READ_SEARCH" id="cap_dac_rs"><label for="cap_dac_rs">DAC_READ_SEARCH</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="DAC_OVERRIDE" id="cap_dac_ov"><label for="cap_dac_ov">DAC_OVERRIDE</label></div>
+        </div>
+
+        <div>
+            <strong style="color: #6c757d;">Networking</strong>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="NET_ADMIN" id="cap_nadmin"><label for="cap_nadmin">NET_ADMIN</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="NET_RAW" id="cap_nraw"><label for="cap_nraw" title="Required for ping, traceroute, raw sockets">NET_RAW</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="NET_BIND_SERVICE" id="cap_nbind"><label for="cap_nbind">NET_BIND_SERVICE</label></div>
+        </div>
+
+        <div>
+            <strong style="color: #6c757d;">System & Kernel</strong>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SYS_PTRACE" id="cap_ptrace"><label for="cap_ptrace" title="Required for strace, gdb">SYS_PTRACE</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SYS_MODULE" id="cap_module"><label for="cap_module" title="Insert/remove kernel modules">SYS_MODULE</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SYS_TIME" id="cap_time"><label for="cap_time">SYS_TIME</label></div>
+            <div class="form-check"><input class="form-check-input cap-checkbox" type="checkbox" value="SYS_ADMIN" id="cap_sadmin"><label class="text-danger font-weight-bold" for="cap_sadmin" title="Effectively root on the host. Highly dangerous.">SYS_ADMIN</label></div>
+        </div>
+    </div>
+    
+    <input type="hidden" name="drop_all_caps" id="drop_all_caps_hidden" value="true">
+    <input type="hidden" name="no_new_privileges" id="no_new_privileges_hidden" value="true">
+    <input type="hidden" name="capabilities" id="capabilities_hidden" value="">
+</div>
+
 <!-- Flag Pattern Configuration -->
 <div class="form-group">
 	<label for="flag_pattern">Flag Pattern<br>

@@ -272,7 +272,15 @@ class ContainerService:
                                 f'traefik.http.routers.{router_name}.service': current_service_name,
                                 f'traefik.http.services.{current_service_name}.loadbalancer.server.port': str(p),
                             })
-                    
+
+                    cap_list = []
+                    if challenge.capabilities:
+                        cap_list = [cap.strip() for cap in challenge.capabilities.split(',') if cap.strip()]
+
+                    security_options = []
+                    if getattr(challenge, 'no_new_privileges', True):
+                        security_options.append('no-new-privileges:true')
+
                     result = self.docker.create_container(
                         image=challenge.image,
                         internal_port=challenge.internal_port,
@@ -286,7 +294,11 @@ class ContainerService:
                         name=container_name,
                         labels=labels,
                         network=target_network,
-                        use_traefik=use_subdomain
+                        use_traefik=use_subdomain,
+                        
+                        cap_add=cap_list if cap_list else None,
+                        cap_drop=['ALL'] if getattr(challenge, 'drop_all_caps', True) else None,
+                        security_opt=security_options if security_options else None
                     )
                     
                     # 5. Update instance

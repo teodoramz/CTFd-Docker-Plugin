@@ -73,7 +73,8 @@ class DockerService:
         labels: Dict[str, str] = None,
         name: str = None,
         network: str = None,  # Network to connect for Traefik routing
-        use_traefik: bool = False  # If True, don't expose host port (Traefik handles routing)
+        use_traefik: bool = False,  # If True, don't expose host port (Traefik handles routing)
+        cap_add=None, cap_drop=None, security_opt=None
     ) -> Dict[str, Any]:
         """
         Create and start a container
@@ -91,6 +92,9 @@ class DockerService:
             name: Container name (optional)
             network: Docker network to connect (for Traefik routing)
             use_traefik: If True, use Traefik for routing instead of host port
+            cap_add: List of capabilities to add (e.g., ['NET_ADMIN'])
+            cap_drop: List of capabilities to drop (e.g., ['ALL'])
+            security_opt: List of security options (e.g., ['no-new-privileges'])
         
         Returns:
             {
@@ -103,6 +107,32 @@ class DockerService:
             raise Exception("Docker is not connected")
         
         try:
+
+            # ==========================================
+            # SECURITY: CAPABILITIES WHITELIST FILTER
+            # ==========================================
+            ALLOWED_CAPS = {
+                'CHOWN', 'SETUID', 'SETGID', 'SYS_CHROOT', 'AUDIT_WRITE',
+                'DAC_READ_SEARCH', 'DAC_OVERRIDE', 'NET_ADMIN', 'NET_RAW',
+                'NET_BIND_SERVICE', 'SYS_PTRACE', 'SYS_MODULE', 'SYS_TIME',
+                'KILL', 'SYS_ADMIN'
+            }
+            
+            safe_cap_add = None
+            if cap_add:
+                safe_cap_add = []
+                for cap in cap_add:
+                    clean_cap = str(cap).strip().upper()
+                    if clean_cap in ALLOWED_CAPS:
+                        safe_cap_add.append(clean_cap)
+                    else:
+                        logger.warning(f"SECURITY ALERT: Dropped unauthorized Docker capability -> {clean_cap}")
+                
+                # If the list is empty after filtering, set back to None
+                if not safe_cap_add:
+                    safe_cap_add = None
+            # ==========================================
+
             # CPU quota calculation
             cpu_period = 100000  # Docker default
             cpu_quota = int(cpu_limit * cpu_period)
@@ -147,9 +177,9 @@ class DockerService:
                 labels=container_labels,
                 network=network_arg,
                 # Security options
-                cap_drop=['ALL'],  # Drop all capabilities
-                cap_add=['CHOWN', 'SETUID', 'SETGID'],  # Add back minimal caps
-                security_opt=['no-new-privileges'],
+                cap_drop=cap_drop,  # Drop all capabilities
+                cap_add=safe_cap_add,  # Add back minimal caps
+                security_opt=security_opt  # e.g., ['no-new-privileges']
             )
             
             # No need to manually connect if network arg is used

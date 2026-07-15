@@ -30,6 +30,13 @@ console.log("[Container INLINE] Script block executing");
       <small style="color: white"> Extend +5m </small>
     </button>
     <button
+      onclick="container_restart({{ challenge.id }})"
+      class="restart-chal btn btn-warning d-none"
+      id="restart-chal"
+    >
+      <small style="color: white"> Restart </small>
+    </button>
+    <button
       onclick="container_stop({{ challenge.id }})"
       class="terminate-chal btn btn-danger d-none"
       id="terminate-chal"

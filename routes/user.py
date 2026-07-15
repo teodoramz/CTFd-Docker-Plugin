@@ -345,11 +345,90 @@ def stop_container():
             return jsonify({'success': True, 'status': 'already_stopped'})
         
         success = container_service.stop_instance(instance, user.id, reason='manual')
-        
+
         if success:
             return jsonify({'success': True})
         else:
             return jsonify({'error': 'Failed to stop container'}), 500
-        
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@user_bp.route('/restart', methods=['POST'])
+@authed_only
+@during_ctf_time_only
+@require_verified_emails
+@ratelimit(method='POST', limit=6, interval=60)
+def restart_container():
+    """
+    Restart container: stop the current instance and provision a fresh one
+    (with a new flag)
+
+    Body:
+        {
+            "challenge_id": 123
+        }
+
+    Response:
+        {
+            "status": "restarted",
+            "instance_uuid": "...",
+            "connection": {...},
+            "expires_at": 1700000000000,
+            "renewal_count": 0,
+            "max_renewals": 3
+        }
+    """
+    try:
+        data = request.get_json()
+        challenge_id = data.get('challenge_id')
+
+        if not challenge_id:
+            return jsonify({'error': 'challenge_id is required'}), 400
+
+        user = get_current_user()
+        account_id, _ = get_account_id()
+
+        # Check if challenge exists
+        challenge = ContainerChallenge.query.get(challenge_id)
+        if not challenge:
+            return jsonify({'error': 'Challenge not found'}), 404
+
+        instance = ContainerInstance.query.filter_by(
+            challenge_id=challenge_id,
+            account_id=account_id
+        ).filter(
+            ContainerInstance.status.in_(ACTIVE_INSTANCE_STATES)
+        ).order_by(ContainerInstance.created_at.desc()).first()
+
+        if instance:
+            # Any reason != 'solved' deletes the temporary flag; restart
+            # generates a fresh flag with the new instance.
+            container_service.stop_instance(instance, user.id, reason='restart')
+
+        # Create fresh instance (raises if the challenge is already solved)
+        instance = container_service.create_instance(
+            challenge_id=challenge_id,
+            account_id=account_id,
+            user_id=user.id
+        )
+
+        return jsonify({
+            'status': 'restarted',
+            'instance_uuid': instance.uuid,
+            'connection': {
+                'host': instance.connection_host,
+                'port': instance.connection_port,
+                'ports': instance.connection_ports,
+                'type': instance.connection_info.get('type') if instance.connection_info else 'ssh',
+                'info': instance.connection_info.get('info') if instance.connection_info else '',
+                'urls': instance.connection_info.get('urls') if instance.connection_info else None
+            },
+            'expires_at': int(instance.expires_at.timestamp() * 1000),
+            'renewal_count': instance.renewal_count,
+            'max_renewals': challenge.get_max_renewals()
+        })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500

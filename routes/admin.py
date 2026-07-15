@@ -649,6 +649,54 @@ def list_images():
         return jsonify({'error': str(e)}), 500
 
 
+@admin_bp.route('/api/images/pull', methods=['POST'], endpoint='api_images_pull')
+@admins_only
+def pull_image():
+    """
+    Start pulling a Docker image in the background (non-blocking).
+
+    JSON body: {'image': 'name:tag'}
+    Poll /api/images/pull-status?image=name:tag for progress.
+    """
+    try:
+        if not docker_service:
+            return jsonify({'error': 'Docker service not available'}), 500
+
+        data = request.get_json(silent=True) or {}
+        image = data.get('image')
+        if not isinstance(image, str) or not image.strip():
+            return jsonify({'error': 'Image name is required'}), 400
+        image = image.strip()
+
+        if not docker_service.is_connected():
+            return jsonify({'error': 'Docker is not connected. Check the connection settings.'}), 400
+
+        status_entry = docker_service.pull_image_async(image)
+        return jsonify({'success': True, **status_entry})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@admin_bp.route('/api/images/pull-status', methods=['GET'], endpoint='api_images_pull_status')
+@admins_only
+def pull_image_status():
+    """Get the status of a background image pull (query param: image)"""
+    try:
+        if not docker_service:
+            return jsonify({'error': 'Docker service not available'}), 500
+
+        image = (request.args.get('image') or '').strip()
+        if not image:
+            return jsonify({'error': 'Image name is required'}), 400
+
+        status = docker_service.get_pull_status(image)
+        if status is None:
+            return jsonify({'status': 'unknown'})
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @admin_bp.route('/api/docker/health', methods=['GET'], endpoint='api_docker_health')
 @admins_only
 def docker_health_check():

@@ -3,6 +3,8 @@ Docker Service - Manage Docker containers
 """
 import docker
 import logging
+import threading
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,10 @@ class DockerService:
         self.base_url = base_url
         self.deployment_id = deployment_id
         self.client = None
+        # Pull-status registry: image name -> {'status', 'detail', 'started_at'}
+        # Guarded by _pull_lock because pulls run in background threads.
+        self._pull_status = {}
+        self._pull_lock = threading.Lock()
         self._connect()
     
     def _connect(self):
@@ -401,7 +407,79 @@ class DockerService:
         except Exception as e:
             logger.error(f"Failed to list images: {e}")
             raise Exception(f"Failed to list Docker images: {e}")
-    
+
+    def pull_image_async(self, image: str) -> dict:
+        """
+        Pull a Docker image in a background thread (non-blocking).
+
+        Pulling inside a web request would block a gunicorn worker for
+        minutes, so the pull runs in a daemon thread and its progress is
+        tracked in self._pull_status (poll it via get_pull_status()).
+
+        Args:
+            image: Image name, e.g. 'nginx:latest' or 'nginx'
+
+        Returns:
+            The status entry for this image:
+            {'status': 'pulling'|'done'|'error', 'detail': str, 'started_at': str}
+        """
+        if not self.is_connected():
+            raise Exception("Docker is not connected")
+
+        with self._pull_lock:
+            existing = self._pull_status.get(image)
+            if existing and existing['status'] == 'pulling':
+                # A pull for this image is already in progress - don't start another
+                return dict(existing)
+
+            entry = {
+                'status': 'pulling',
+                'detail': '',
+                'started_at': datetime.utcnow().isoformat()
+            }
+            self._pull_status[image] = entry
+
+        def _do_pull():
+            try:
+                # If the image reference has no tag (no ':' after the last '/'),
+                # pull 'latest' explicitly - otherwise docker pulls ALL tags.
+                if ':' in image.rsplit('/', 1)[-1]:
+                    pulled = self.client.images.pull(image)
+                else:
+                    pulled = self.client.images.pull(image, tag='latest')
+                with self._pull_lock:
+                    self._pull_status[image] = {
+                        'status': 'done',
+                        'detail': getattr(pulled, 'id', str(pulled)),
+                        'started_at': entry['started_at']
+                    }
+                logger.info(f"Pulled image {image}")
+            except Exception as e:
+                with self._pull_lock:
+                    self._pull_status[image] = {
+                        'status': 'error',
+                        'detail': str(e),
+                        'started_at': entry['started_at']
+                    }
+                logger.error(f"Failed to pull image {image}: {e}")
+
+        thread = threading.Thread(target=_do_pull, daemon=True, name=f'image-pull-{image}')
+        thread.start()
+
+        return dict(entry)
+
+    def get_pull_status(self, image: str) -> Optional[dict]:
+        """
+        Get the pull status for an image
+
+        Returns:
+            A copy of the status entry, or None if no pull was started
+        """
+        with self._pull_lock:
+            entry = self._pull_status.get(image)
+            return dict(entry) if entry else None
+
+
     def get_container_logs(self, container_id: str, tail: int = 100) -> Optional[str]:
         """
         Get container logs

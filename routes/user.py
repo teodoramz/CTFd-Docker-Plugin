@@ -217,6 +217,15 @@ def get_container_info(challenge_id):
             container_service.stop_instance(instance, user_id=None, reason='expired')
             return jsonify({'status': 'not_found'})
 
+        # Self-heal: the DB says running but the container died/was removed
+        # (crash, OOM-kill with auto_remove, manual docker rm). Only act on a
+        # definitive False - None means Docker is unreachable, don't guess.
+        if (instance and instance.status == 'running' and instance.container_id
+                and container_service
+                and container_service.docker.container_exists(instance.container_id) is False):
+            container_service.stop_instance(instance, user_id=None, reason='died')
+            return jsonify({'status': 'not_found'})
+
         if not instance:
             return jsonify({'status': 'not_found'})
         

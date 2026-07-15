@@ -105,8 +105,12 @@ class DockerService:
         """
         if not self.is_connected():
             raise Exception("Docker is not connected")
-        
+
         try:
+            # Fail fast if the image is not present on the Docker host.
+            # docker-py's containers.run() would otherwise pull it inside the
+            # web request, blocking a worker for minutes and freezing the platform.
+            self.client.images.get(image)
 
             # ==========================================
             # SECURITY: CAPABILITIES WHITELIST FILTER
@@ -193,7 +197,10 @@ class DockerService:
             
         except docker.errors.ImageNotFound:
             logger.error(f"Docker image not found: {image}")
-            raise Exception(f"Docker image '{image}' not found")
+            raise Exception(
+                f"Docker image '{image}' is not available on the Docker host. "
+                f"Pull it first (docker pull {image})"
+            )
         except docker.errors.APIError as e:
             logger.error(f"Docker API error: {e}")
             raise Exception(f"Failed to create container: {e}")
@@ -214,19 +221,63 @@ class DockerService:
         if not self.is_connected():
             logger.warning("Docker not connected, cannot stop container")
             return False
-        
+
         try:
             container = self.client.containers.get(container_id)
-            container.stop(timeout=3)
-            container.remove()
-            logger.info(f"Stopped and removed container {container_id[:12]}")
-            return True
         except docker.errors.NotFound:
             logger.info(f"Container {container_id[:12]} not found (already removed)")
             return True
         except Exception as e:
+            logger.error(f"Error looking up container {container_id[:12]}: {e}")
+            return False
+
+        try:
+            container.stop(timeout=3)
+        except docker.errors.NotFound:
+            return True
+        except docker.errors.APIError as e:
+            # Containers run with auto_remove=True are removed by the daemon as
+            # soon as they stop, so 404/409 here means the stop already happened.
+            if e.status_code in (404, 409):
+                logger.info(f"Container {container_id[:12]} already stopped/being removed")
+                return True
             logger.error(f"Error stopping container {container_id[:12]}: {e}")
             return False
+        except Exception as e:
+            logger.error(f"Error stopping container {container_id[:12]}: {e}")
+            return False
+
+        # auto_remove handles removal; explicit remove is a fallback and racing
+        # with the daemon's own removal is expected.
+        try:
+            container.remove(force=True)
+        except (docker.errors.NotFound, docker.errors.APIError):
+            pass
+        except Exception as e:
+            logger.warning(f"Error removing container {container_id[:12]}: {e}")
+
+        logger.info(f"Stopped and removed container {container_id[:12]}")
+        return True
+
+    def container_exists(self, container_id: str) -> Optional[bool]:
+        """
+        Check if a container still exists on the Docker host
+
+        Returns:
+            True if it exists, False if it is gone,
+            None if Docker is unreachable (unknown - do not act on it)
+        """
+        if not self.is_connected():
+            return None
+
+        try:
+            self.client.containers.get(container_id)
+            return True
+        except docker.errors.NotFound:
+            return False
+        except Exception as e:
+            logger.error(f"Error checking container {container_id[:12]}: {e}")
+            return None
     
     def get_container_status(self, container_id: str) -> Optional[str]:
         """

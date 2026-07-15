@@ -219,7 +219,9 @@ class ContainerService:
                     import re
                     # Sanitize challenge name (only alphanumeric and hyphens)
                     safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
-                    container_name = f"{safe_name}_{instance.account_id}"
+                    # Include the instance UUID so retries / leftover containers
+                    # never collide on the container name (409 name conflict)
+                    container_name = f"{safe_name}_{instance.account_id}_{instance.uuid[:8]}"
                     
                     # Replace {FLAG} placeholder in command if present
                     command = challenge.command if challenge.command else None
@@ -509,10 +511,16 @@ class ContainerService:
             logger.warning(f"Failed to cancel Redis expiration: {e}")
         
         try:
-            # Stop Docker container
+            # Stop Docker container. stop_container() returns True when the
+            # container was stopped OR is already gone; False means it is
+            # likely still running - do NOT mark the instance stopped then,
+            # otherwise the container is orphaned and keeps running.
             if instance.container_id:
-                self.docker.stop_container(instance.container_id)
-            
+                if not self.docker.stop_container(instance.container_id):
+                    raise Exception(
+                        f"Docker failed to stop container {instance.container_id[:12]}"
+                    )
+
             # Release port back to pool
             if instance.connection_port:
                 self.port_manager.release_port(instance.connection_port)
@@ -612,9 +620,102 @@ class ContainerService:
                     failed += 1
             
             logger.info(f"Cleanup completed: {cleaned} cleaned, {failed} failed")
-        
+
         finally:
             self._cleanup_running = False
+
+    def recover_stale_instances(self):
+        """
+        Background job: recover instances stuck in transient states
+        ('pending', 'stopping'), e.g. after a crash/restart mid-operation.
+        These otherwise stay stuck forever and keep their ports reserved.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=5)
+        stale = ContainerInstance.query.filter(
+            ContainerInstance.status.in_(['pending', 'stopping']),
+            ContainerInstance.created_at < cutoff
+        ).limit(50).all()
+
+        for instance in stale:
+            try:
+                if instance.status == 'stopping':
+                    logger.warning(f"Retrying stop for instance {instance.uuid} stuck in 'stopping'")
+                    self.stop_instance(instance, user_id=None, reason='stale')
+                elif instance.is_expired():
+                    logger.warning(f"Marking instance {instance.uuid} stuck in 'pending' as error")
+                    instance.status = 'error'
+                    instance.extra_data = {'error': 'stuck in pending state'}
+                    db.session.commit()
+            except Exception as e:
+                logger.error(f"Failed to recover stale instance {instance.uuid}: {e}")
+                db.session.rollback()
+
+    def reconcile_with_docker(self):
+        """
+        Background job: sync database state with Docker reality.
+
+        - Instances marked 'running' whose container died/vanished are marked
+          stopped, so users see "no active instance" instead of a dead
+          connection and can immediately request a new one.
+        - Docker containers whose instance is no longer active are removed
+          (orphans left behind by failed stops or manual DB edits).
+        """
+        if not self.docker or not self.docker.is_connected():
+            return
+
+        try:
+            containers = self.docker.list_managed_containers()
+        except Exception as e:
+            logger.error(f"Reconcile: failed to list containers: {e}")
+            return
+
+        live_uuids = set()
+        for container in containers:
+            container_uuid = container.labels.get('ctfd.instance_uuid')
+            if container_uuid:
+                live_uuids.add(container_uuid)
+
+        # 1. Running instances whose container is gone -> mark stopped
+        running = ContainerInstance.query.filter(
+            ContainerInstance.status == 'running'
+        ).all()
+
+        # Grace period so we never kill an instance whose container was
+        # created after our container listing above (startup race).
+        grace = datetime.utcnow() - timedelta(seconds=60)
+
+        active_uuids = set()
+        for instance in running:
+            active_uuids.add(instance.uuid)
+            if (instance.uuid not in live_uuids
+                    and instance.started_at
+                    and instance.started_at < grace):
+                logger.warning(f"Container for instance {instance.uuid} died unexpectedly - marking stopped")
+                try:
+                    self.stop_instance(instance, user_id=None, reason='died')
+                except Exception as e:
+                    logger.error(f"Failed to mark dead instance {instance.uuid}: {e}")
+
+        # Provisioning/stopping instances are also "active" - don't touch their containers
+        transitional = ContainerInstance.query.filter(
+            ContainerInstance.status.in_(['pending', 'provisioning', 'stopping'])
+        ).all()
+        for instance in transitional:
+            active_uuids.add(instance.uuid)
+
+        # 2. Containers with no active instance -> orphans, remove them
+        for container in containers:
+            container_uuid = container.labels.get('ctfd.instance_uuid')
+            if container_uuid and container_uuid not in active_uuids:
+                logger.warning(f"Removing orphaned container {container.id[:12]} (instance {container_uuid})")
+                try:
+                    container.stop(timeout=3)
+                except Exception:
+                    pass
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    pass
     
     def cleanup_old_instances(self):
         """

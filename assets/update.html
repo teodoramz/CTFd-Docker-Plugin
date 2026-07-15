@@ -201,8 +201,8 @@
         </div>
     </div>
     
-    <input type="hidden" name="drop_all_caps" id="drop_all_caps_hidden" value="true">
-    <input type="hidden" name="no_new_privileges" id="no_new_privileges_hidden" value="true">
+    <input type="hidden" name="drop_all_caps" id="drop_all_caps_hidden" value="{{ 'true' if challenge.drop_all_caps else 'false' }}">
+    <input type="hidden" name="no_new_privileges" id="no_new_privileges_hidden" value="{{ 'true' if challenge.no_new_privileges else 'false' }}">
     <input type="hidden" name="capabilities" id="capabilities_hidden" value="{{ challenge.capabilities | default('') }}">
 </div>
 

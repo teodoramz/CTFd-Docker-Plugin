@@ -865,6 +865,17 @@ def import_challenges():
                     container_decay = None
                     container_minimum = None
                 
+                # Parse security capabilities
+                raw_caps = str(row_data.get('capabilities') or '')
+                capabilities = ','.join(
+                    c.strip().upper() for c in re.split(r'[,;]', raw_caps) if c.strip()
+                )
+
+                def parse_bool(val, default=True):
+                    if val is None or str(val).strip() == '':
+                        return default
+                    return str(val).strip().lower() in ('true', '1', 'yes')
+
                 # Create challenge
                 challenge = ContainerChallenge(
                     name=str(row_data['name']),
@@ -873,14 +884,20 @@ def import_challenges():
                     value=value,
                     state=str(row_data.get('state', 'visible')),
                     type='container',
-                    
+
                     # Container fields
                     image=str(row_data['image']),
                     internal_port=int(row_data.get('internal_port', 22)),
+                    internal_ports=str(row_data.get('internal_ports') or ''),
                     command=str(row_data.get('command', '')),
                     container_connection_type=str(row_data.get('connection_type', 'ssh')),
                     container_connection_info=str(row_data.get('connection_info', '')),
-                    
+
+                    # Security capabilities
+                    capabilities=capabilities,
+                    drop_all_caps=parse_bool(row_data.get('drop_all_caps'), default=True),
+                    no_new_privileges=parse_bool(row_data.get('no_new_privileges'), default=True),
+
                     # Flag fields
                     flag_mode=flag_mode,
                     flag_prefix=flag_prefix,
@@ -936,12 +953,13 @@ def download_template():
         
         # CSV headers
         headers = [
-            'name', 'category', 'description', 'image', 'internal_port',
+            'name', 'category', 'description', 'image', 'internal_port', 'internal_ports',
             'command', 'connection_type', 'connection_info',
+            'capabilities', 'drop_all_caps', 'no_new_privileges',
             'flag_pattern', 'scoring_type', 'value',
             'initial', 'decay', 'minimum', 'decay_function', 'state'
         ]
-        
+
         # Example rows
         examples = [
             {
@@ -950,9 +968,13 @@ def download_template():
                 'description': 'Find the flag',
                 'image': 'nginx:latest',
                 'internal_port': '80',
+                'internal_ports': '',
                 'command': '',
                 'connection_type': 'http',
                 'connection_info': 'Access via browser',
+                'capabilities': '',
+                'drop_all_caps': 'true',
+                'no_new_privileges': 'true',
                 'flag_pattern': 'CTF{static_flag}',
                 'scoring_type': 'standard',
                 'value': '100',
@@ -968,9 +990,13 @@ def download_template():
                 'description': 'SSH and find flag',
                 'image': 'ubuntu:20.04',
                 'internal_port': '22',
+                'internal_ports': '',
                 'command': '/usr/sbin/sshd -D',
                 'connection_type': 'ssh',
                 'connection_info': 'user:ctf pass:ctf',
+                'capabilities': 'CHOWN,SETUID,SETGID,SYS_CHROOT,AUDIT_WRITE',
+                'drop_all_caps': 'true',
+                'no_new_privileges': 'true',
                 'flag_pattern': 'CTF{<ran_16>}',
                 'scoring_type': 'dynamic',
                 'value': '',

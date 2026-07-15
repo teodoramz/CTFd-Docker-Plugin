@@ -29,7 +29,6 @@ from .services import (
     FlagService,
     ContainerService,
     AntiCheatService,
-    AntiCheatService,
     PortManager,
     NotificationService
 )
@@ -159,11 +158,17 @@ class ContainerChallengeType(BaseChallenge):
             # Container specific
             "image": challenge.image,
             "internal_port": challenge.internal_port,
+            "internal_ports": challenge.internal_ports,
             "connection_type": challenge.container_connection_type,
             "connection_info": challenge.container_connection_info,
             "timeout_minutes": challenge.timeout_minutes,
             "max_renewals": challenge.max_renewals,
             "flag_mode": challenge.flag_mode,
+            # Security capabilities (needed so the update form reflects saved values)
+            "capabilities": challenge.capabilities,
+            "drop_all_caps": challenge.drop_all_caps,
+            "no_new_privileges": challenge.no_new_privileges,
+            "pids_limit": challenge.pids_limit,
             # Dynamic scoring
             "initial": challenge.container_initial,
             "minimum": challenge.container_minimum,
@@ -203,8 +208,10 @@ class ContainerChallengeType(BaseChallenge):
             if attr in exclude_fields:
                 continue
             
-            # Skip if empty
-            if value == '':
+            # Skip if empty, except fields where empty is a valid value
+            # (e.g. clearing all extra capabilities must be possible)
+            clearable = ('capabilities', 'internal_ports', 'command', 'container_connection_info')
+            if value == '' and field_mapping.get(attr, attr) not in clearable:
                 continue
             
             # Map field name to actual attribute
@@ -404,7 +411,6 @@ flag_service = None
 container_service = None
 anticheat_service = None
 port_manager = None
-port_manager = None
 redis_expiration_service = None
 notification_service = None
 
@@ -564,6 +570,22 @@ def _setup_background_jobs(app):
                 id='cleanup_expired'
             )
             logger.info("Scheduled: cleanup_expired_instances (every 1 minute)")
+
+        # Recover stuck instances + sync DB with Docker every 1 minute
+        if container_service:
+            scheduler.add_job(
+                func=lambda: _run_with_app_context(app, container_service.recover_stale_instances),
+                trigger="interval",
+                minutes=1,
+                id='recover_stale'
+            )
+            scheduler.add_job(
+                func=lambda: _run_with_app_context(app, container_service.reconcile_with_docker),
+                trigger="interval",
+                minutes=1,
+                id='reconcile_docker'
+            )
+            logger.info("Scheduled: recover_stale_instances + reconcile_with_docker (every 1 minute)")
         
         # Cleanup old instances every 1 hour
         if container_service:

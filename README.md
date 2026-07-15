@@ -172,12 +172,22 @@ Access admin panel: **Admin → Plugin → Containers → Settings**
 #### Example CSV
 
 ```csv
-name,category,description,image,internal_port,command,connection_type,connection_info,flag_pattern,scoring_type,value,initial,decay,minimum,decay_function,state
-Web Challenge,Web,Find the flag in web app,nginx:latest,80,,http,Access via browser,CTF{web_<ran_8>},dynamic,,500,25,100,logarithmic,visible
-Simple Challenge,Misc,Easy one,alpine:latest,22,,tcp,Just connect,CTF{static_flag},standard,50,,,,standard,visible
+name,category,description,image,internal_port,internal_ports,command,connection_type,connection_info,capabilities,drop_all_caps,no_new_privileges,flag_pattern,scoring_type,value,initial,decay,minimum,decay_function,state
+Web Challenge,Web,Find the flag in web app,nginx:latest,80,,,http,Access via browser,,true,true,CTF{web_<ran_8>},dynamic,,500,25,100,logarithmic,visible
+Simple Challenge,Misc,Easy one,alpine:latest,22,,,tcp,Just connect,,true,true,CTF{static_flag},standard,50,,,,standard,visible
+SSH Challenge,Pwn,SSH in and get root,ubuntu:20.04,22,,/usr/sbin/sshd -D,ssh,user:ctf pass:ctf,"CHOWN,SETUID,SETGID,SYS_CHROOT,AUDIT_WRITE",true,true,CTF{<ran_16>},dynamic,,500,20,100,logarithmic,visible
 ```
 
-**⚠️ IMPORTANT:** Docker image MUST include version tag (`:latest`, `:20.04`, etc.)
+**Security capability columns** (optional — defaults apply when left empty):
+
+| Column | Description | Default |
+|--------|-------------|---------|
+| `capabilities` | Comma- or semicolon-separated Linux capabilities to add back (e.g. `"CHOWN,SETUID,SETGID"`). Quote the value if you use commas. Only whitelisted capabilities are applied at container start; unknown ones are dropped with a warning in the logs. | empty |
+| `drop_all_caps` | `true`/`false` — drop all default Docker capabilities | `true` |
+| `no_new_privileges` | `true`/`false` — set the `no-new-privileges` security option | `true` |
+| `internal_ports` | Comma-separated list for multi-port challenges (e.g. `"80,22"`). Quote the value. | empty |
+
+**⚠️ IMPORTANT:** Docker image MUST include version tag (`:latest`, `:20.04`, etc.) and must already be pulled on the Docker host — images are not pulled automatically at instance start.
 
 3. **Upload CSV** and wait for import to complete
 4. **Check results**: Success/error messages will be displayed

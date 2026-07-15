@@ -265,6 +265,54 @@ class DockerService:
         logger.info(f"Stopped and removed container {container_id[:12]}")
         return True
 
+    def verify_container_startup(self, container_id: str, wait_seconds: float = 2.0, interval: float = 0.5):
+        """
+        Verify a freshly started container stays up for a short window.
+
+        Catches images/commands that exit immediately (bad entrypoint, missing
+        binary, crash on start) BEFORE the user is shown connection info.
+
+        Args:
+            container_id: Container ID
+            wait_seconds: Observation window
+            interval: Poll interval
+
+        Returns:
+            (ok: bool, detail: str) - detail contains the last log lines when
+            the container died and they could still be read
+        """
+        if not self.is_connected():
+            return True, 'docker unreachable - verification skipped'
+
+        import time
+        deadline = time.time() + wait_seconds
+
+        while True:
+            try:
+                container = self.client.containers.get(container_id)
+            except docker.errors.NotFound:
+                # auto_remove already deleted it - it exited right after start
+                return False, 'container exited immediately and was auto-removed (check image entrypoint/command)'
+            except Exception as e:
+                logger.warning(f"Startup verification skipped for {container_id[:12]}: {e}")
+                return True, f'verification skipped: {e}'
+
+            if container.status in ('exited', 'dead'):
+                logs = ''
+                try:
+                    logs = container.logs(tail=20).decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    pass
+                detail = f"container status '{container.status}'"
+                if logs:
+                    detail += f", last logs: {logs}"
+                return False, detail
+
+            if time.time() >= deadline:
+                return True, container.status
+
+            time.sleep(interval)
+
     def container_exists(self, container_id: str) -> Optional[bool]:
         """
         Check if a container still exists on the Docker host

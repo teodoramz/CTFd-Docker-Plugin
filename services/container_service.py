@@ -16,6 +16,13 @@ from .port_manager import PortManager
 logger = logging.getLogger(__name__)
 
 
+class NonRetryableProvisionError(Exception):
+    """
+    Provisioning failure that will not succeed on retry
+    (e.g. the container exits immediately after start).
+    """
+
+
 class ContainerService:
     """
     Service to manage container lifecycle
@@ -303,6 +310,15 @@ class ContainerService:
                         security_opt=security_options if security_options else None
                     )
                     
+                    # Verify the container actually stays up before exposing
+                    # connection info to the user. A container that dies right
+                    # away (bad command/entrypoint) fails here with its logs.
+                    ok, detail = self.docker.verify_container_startup(result['container_id'])
+                    if not ok:
+                        raise NonRetryableProvisionError(
+                            f"Container failed to start: {detail}"
+                        )
+
                     # 5. Update instance
                     instance.container_id = result['container_id']
                     instance.connection_port = host_port
@@ -397,6 +413,10 @@ class ContainerService:
                     # Success: break loop
                     break
                     
+                except NonRetryableProvisionError:
+                    # Retrying cannot help (the container itself is broken) -
+                    # propagate straight to the outer handler.
+                    raise
                 except Exception as e:
                     logger.warning(f"Attempt {attempt+1}/{max_retries} failed: {e}")
                     # If this was the last attempt, re-raise the exception

@@ -13,17 +13,21 @@ class DockerService:
     Service to interact with Docker daemon
     """
     
-    def __init__(self, base_url='unix://var/run/docker.sock'):
+    def __init__(self, base_url='unix://var/run/docker.sock', deployment_id=None):
         """
         Initialize Docker client
-        
+
         Args:
             base_url: Docker daemon URL
                      - Unix socket: 'unix://var/run/docker.sock' (default)
                      - TCP: 'tcp://192.168.1.100:2376'
                      - SSH: 'ssh://user@host:port' or 'ssh://user@host' (default port 22)
+            deployment_id: Unique ID of this CTFd deployment. Stamped on every
+                     container so multiple CTFd instances can safely share one
+                     Docker host without touching each other's containers.
         """
         self.base_url = base_url
+        self.deployment_id = deployment_id
         self.client = None
         self._connect()
     
@@ -147,6 +151,8 @@ class DockerService:
                 'ctfd.managed': 'true',
                 'ctfd.plugin': 'containers'
             })
+            if self.deployment_id:
+                container_labels['ctfd.deployment'] = self.deployment_id
             
             # Port mapping - only if not using Traefik
             ports_config = None
@@ -312,12 +318,21 @@ class DockerService:
         """
         if not self.is_connected():
             return []
-        
+
         try:
-            return self.client.containers.list(
+            containers = self.client.containers.list(
                 all=True,
                 filters={'label': 'ctfd.managed=true'}
             )
+            if not self.deployment_id:
+                return containers
+            # Only containers belonging to THIS deployment. Containers without
+            # the label are legacy ones created before the label existed -
+            # treat them as ours (pre-label behavior assumed a single deployment).
+            return [
+                c for c in containers
+                if c.labels.get('ctfd.deployment') in (None, '', self.deployment_id)
+            ]
         except Exception as e:
             logger.error(f"Error listing containers: {e}")
             return []

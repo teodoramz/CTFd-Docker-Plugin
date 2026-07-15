@@ -438,7 +438,10 @@ def load(app: Flask):
         docker_socket = ContainerConfig.get('docker_socket', 'unix://var/run/docker.sock')
         
         # docker-py handles SSH URLs directly
-        docker_service = DockerService(base_url=docker_socket)
+        docker_service = DockerService(
+            base_url=docker_socket,
+            deployment_id=ContainerConfig.get('deployment_id')
+        )
         
         # Test connection but don't fail plugin load if unavailable
         if docker_service.is_connected():
@@ -451,7 +454,10 @@ def load(app: Flask):
         logger.warning("Plugin loaded successfully. Configure Docker in Admin → Containers → Settings")
         # Create a dummy docker service that will fail gracefully
         try:
-            docker_service = DockerService(base_url=docker_socket if 'docker_socket' in locals() else 'unix://var/run/docker.sock')
+            docker_service = DockerService(
+                base_url=docker_socket if 'docker_socket' in locals() else 'unix://var/run/docker.sock',
+                deployment_id=ContainerConfig.get('deployment_id')
+            )
         except:
             docker_service = None
     
@@ -548,6 +554,14 @@ def _initialize_default_config():
         if ContainerConfig.get(key) is None:
             ContainerConfig.set(key, value)
             logger.info(f"Set default config: {key}={value}")
+
+    # Unique ID of this deployment, generated once. Stamped on every container
+    # so multiple CTFd instances can share one Docker host safely.
+    if ContainerConfig.get('deployment_id') is None:
+        import uuid
+        deployment_id = uuid.uuid4().hex[:12]
+        ContainerConfig.set('deployment_id', deployment_id)
+        logger.info(f"Generated deployment ID: {deployment_id}")
 
 
 def _setup_background_jobs(app):

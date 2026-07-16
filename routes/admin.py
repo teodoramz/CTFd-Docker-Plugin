@@ -1048,6 +1048,21 @@ def test_challenge(challenge_id):
         except Exception:
             logs = None
 
+        # Belt-and-braces: if the container died after startup verification
+        # (slow-crashing image), report the test as FAILED instead of showing
+        # connection info to a corpse.
+        if (docker_service and instance.container_id
+                and docker_service.container_exists(instance.container_id) is False):
+            try:
+                container_service.stop_instance(instance, user.id, reason='died')
+            except Exception:
+                pass
+            return jsonify({
+                'error': 'Container died right after start - the image/command does not work '
+                         'with this challenge configuration (check capabilities and limits)',
+                'logs': logs
+            }), 500
+
         flag = None
         if flag_service and instance.flag_encrypted:
             flag = flag_service.decrypt_flag(instance.flag_encrypted)

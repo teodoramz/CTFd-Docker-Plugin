@@ -271,7 +271,7 @@ class DockerService:
         logger.info(f"Stopped and removed container {container_id[:12]}")
         return True
 
-    def verify_container_startup(self, container_id: str, wait_seconds: float = 2.0, interval: float = 0.5):
+    def verify_container_startup(self, container_id: str, wait_seconds: float = 5.0, interval: float = 0.5):
         """
         Verify a freshly started container stays up for a short window.
 
@@ -303,7 +303,8 @@ class DockerService:
                 logger.warning(f"Startup verification skipped for {container_id[:12]}: {e}")
                 return True, f'verification skipped: {e}'
 
-            if container.status in ('exited', 'dead'):
+            # 'removing' means it already exited and auto_remove is deleting it
+            if container.status in ('exited', 'dead', 'removing'):
                 logs = ''
                 try:
                     logs = container.logs(tail=20).decode('utf-8', errors='ignore').strip()

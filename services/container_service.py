@@ -670,6 +670,22 @@ class ContainerService:
                 logger.error(f"Failed to recover stale instance {instance.uuid}: {e}")
                 db.session.rollback()
 
+        # Instances stuck in 'provisioning' (e.g. CTFd crashed mid-provision)
+        # hold a user slot for the rest of their lifetime - fail them after
+        # 10 minutes (real provisioning takes seconds).
+        stuck_provisioning = ContainerInstance.query.filter(
+            ContainerInstance.status == 'provisioning',
+            ContainerInstance.created_at < datetime.utcnow() - timedelta(minutes=10)
+        ).limit(50).all()
+
+        for instance in stuck_provisioning:
+            try:
+                logger.warning(f"Failing instance {instance.uuid} stuck in 'provisioning'")
+                self.stop_instance(instance, user_id=None, reason='stale')
+            except Exception as e:
+                logger.error(f"Failed to recover stuck provisioning {instance.uuid}: {e}")
+                db.session.rollback()
+
     def reconcile_with_docker(self):
         """
         Background job: sync database state with Docker reality.

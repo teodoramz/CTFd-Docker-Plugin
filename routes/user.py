@@ -137,27 +137,31 @@ def request_container():
         ).count()
         
         if running_count >= max_containers:
+            # Tell the user exactly WHICH challenges hold their slots
+            active_instances = ContainerInstance.query.filter_by(
+                account_id=account_id
+            ).filter(
+                ContainerInstance.status.in_(['running', 'provisioning']),
+                ContainerInstance.expires_at > db.func.now()
+            ).order_by(ContainerInstance.created_at.desc()).all()
+
+            names = []
+            for inst in active_instances:
+                if inst.challenge and getattr(inst.challenge, 'name', None):
+                    names.append(inst.challenge.name)
+                else:
+                    names.append(f'Challenge #{inst.challenge_id}')
+
             if max_containers == 1:
-                active_instance = ContainerInstance.query.filter_by(
-                    account_id=account_id
-                ).filter(
-                    ContainerInstance.status.in_(['running', 'provisioning']),
-                    ContainerInstance.expires_at > db.func.now()
-                ).order_by(ContainerInstance.created_at.desc()).first()
-
-                active_name = 'active containers'
-                if active_instance:
-                    if active_instance.challenge and getattr(active_instance.challenge, 'name', None):
-                        active_name = active_instance.challenge.name
-                    elif getattr(active_instance, 'challenge_id', None):
-                        active_name = f'Challenge #{active_instance.challenge_id}'
-
+                active_name = names[0] if names else 'active containers'
                 return jsonify({
                     'error': f'You have one container running already. Stop "{active_name}" before starting another challenge.'
                 }), 403
 
+            listing = ', '.join(f'"{n}"' for n in names) if names else ''
             return jsonify({
-                'error': f'You have reached the maximum number of concurrent containers ({max_containers})'
+                'error': f'You have reached the maximum number of concurrent containers ({max_containers}).'
+                         + (f' Active: {listing}. Stop one to start another.' if listing else '')
             }), 403
         
         # Create new instance

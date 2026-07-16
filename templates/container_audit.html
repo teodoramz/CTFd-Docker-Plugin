@@ -82,6 +82,10 @@
 		<button type="button" class="btn btn-outline-secondary btn-sm" onclick="location.reload()">
 			<i class="fas fa-sync-alt"></i> Refresh
 		</button>
+		<a href="{{ url_for('containers_admin.audit_log_export', **filters) }}"
+			class="btn btn-outline-secondary btn-sm">
+			<i class="fas fa-download"></i> Export CSV
+		</a>
 	</div>
 </div>
 

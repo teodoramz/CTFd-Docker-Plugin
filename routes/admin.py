@@ -294,6 +294,115 @@ def audit_log():
                          })
 
 
+@admin_bp.route('/audit/export')
+@admins_only
+def audit_log_export():
+    """Export audit log as CSV (honours the same filters as the audit page)"""
+    from flask import make_response
+    import csv
+    import io
+    import json
+
+    # Get filters from request (same as audit_log)
+    event_type = request.args.get("event_type", "").strip()
+    severity = request.args.get("severity", "").strip()
+    account_id = request.args.get("account_id", type=int)
+    challenge_id = request.args.get("challenge_id", type=int)
+
+    # Base query
+    query = ContainerAuditLog.query
+
+    # Apply filters
+    if event_type:
+        query = query.filter_by(event_type=event_type)
+
+    if severity:
+        query = query.filter_by(severity=severity)
+
+    if account_id:
+        query = query.filter_by(account_id=account_id)
+
+    if challenge_id:
+        query = query.filter_by(challenge_id=challenge_id)
+
+    logs = query.order_by(ContainerAuditLog.timestamp.desc()).limit(10000).all()
+
+    # Challenge name lookup
+    challenge_names = {c.id: c.name for c in ContainerChallenge.query.all()}
+
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'timestamp', 'event_type', 'severity', 'challenge_id', 'challenge_name',
+        'account_id', 'user_id', 'instance_id', 'ip_address', 'details'
+    ])
+
+    for log in logs:
+        writer.writerow([
+            log.timestamp.strftime('%Y-%m-%d %H:%M:%S') if log.timestamp else '',
+            log.event_type,
+            log.severity or '',
+            log.challenge_id if log.challenge_id is not None else '',
+            challenge_names.get(log.challenge_id, ''),
+            log.account_id if log.account_id is not None else '',
+            log.user_id if log.user_id is not None else '',
+            log.instance_id if log.instance_id is not None else '',
+            log.ip_address or '',
+            json.dumps(log.details, separators=(',', ':')) if log.details else ''
+        ])
+
+    # Create response
+    response = make_response(output.getvalue())
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = 'attachment; filename=container_audit_log.csv'
+
+    return response
+
+
+@admin_bp.route('/cheats/export')
+@admins_only
+def cheats_export():
+    """Export cheat detection log as CSV"""
+    from flask import make_response
+    import csv
+    import io
+
+    cheat_logs = ContainerFlagAttempt.query.filter(
+        ContainerFlagAttempt.is_cheating == True
+    ).order_by(ContainerFlagAttempt.timestamp.desc()).limit(10000).all()
+
+    # Challenge name lookup
+    challenge_names = {c.id: c.name for c in ContainerChallenge.query.all()}
+
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'timestamp', 'challenge_id', 'challenge_name', 'cheater_account_id',
+        'cheater_user_id', 'flag_owner_account_id', 'submitted_flag_hash', 'ip_address'
+    ])
+
+    for log in cheat_logs:
+        writer.writerow([
+            log.timestamp.strftime('%Y-%m-%d %H:%M:%S') if log.timestamp else '',
+            log.challenge_id if log.challenge_id is not None else '',
+            challenge_names.get(log.challenge_id, ''),
+            log.account_id if log.account_id is not None else '',
+            log.user_id if log.user_id is not None else '',
+            log.flag_owner_account_id if log.flag_owner_account_id is not None else '',
+            log.submitted_flag_hash or '',
+            log.ip_address or ''
+        ])
+
+    # Create response
+    response = make_response(output.getvalue())
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = 'attachment; filename=container_cheat_log.csv'
+
+    return response
+
+
 # ============================================================================
 # Admin APIs
 # ============================================================================

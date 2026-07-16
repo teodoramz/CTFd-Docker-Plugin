@@ -14,13 +14,34 @@
 		padding: 15px;
 	}
 
-	.details-cell code {
-		display: inline-block;
-		max-width: 280px;
+	.details-cell {
+		max-width: 340px;
+	}
+
+	.details-cell summary {
+		cursor: pointer;
+		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		white-space: nowrap;
-		vertical-align: middle;
+		max-width: 320px;
+	}
+
+	.details-cell summary:focus {
+		outline: none;
+	}
+
+	.details-cell .badge {
+		font-weight: normal;
+		font-family: monospace;
+	}
+
+	.details-cell pre {
+		max-width: 320px;
+		max-height: 220px;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-all;
+		font-size: 0.75rem;
 	}
 </style>
 
@@ -179,8 +200,25 @@
 				</td>
 				<td class="pr-4 details-cell">
 					{% if log.details %}
-					{% set details_json = log.details | tojson %}
-					<code class="small" title="{{ details_json }}">{{ details_json }}</code>
+					<details>
+						<summary class="small">
+							{% if log.details is mapping %}
+							{% for k, v in log.details.items() %}
+							{% if loop.index <= 2 %}
+							<span class="badge badge-light border">
+								{{ k }}: {{ ((v if v is string else v | tojson) or '') | truncate(22, true) }}
+							</span>
+							{% endif %}
+							{% endfor %}
+							{% if log.details | length > 2 %}
+							<span class="badge badge-light border">+{{ log.details | length - 2 }} more</span>
+							{% endif %}
+							{% else %}
+							<span class="badge badge-light border">view details</span>
+							{% endif %}
+						</summary>
+						<pre class="bg-light border rounded p-2 mt-1 mb-0">{{ log.details | tojson(indent=2) }}</pre>
+					</details>
 					{% else %}
 					<span class="text-muted small">-</span>
 					{% endif %}

@@ -554,6 +554,64 @@ function container_restart(challenge_id) {
     // console.log("[Container] MutationObserver started");
 })();
 
+function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+    }
+    // Fallback for non-secure contexts (plain http): temporary textarea + execCommand.
+    return new Promise(function (resolve, reject) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-9999px';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            const ok = document.execCommand('copy');
+            document.body.removeChild(textarea);
+            ok ? resolve() : reject(new Error('execCommand copy failed'));
+        } catch (e) {
+            document.body.removeChild(textarea);
+            reject(e);
+        }
+    });
+}
+
+function makeCopyable(element, textToCopy) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm btn-outline-secondary';
+    button.title = 'Copy';
+    button.setAttribute('aria-label', 'Copy to clipboard');
+    button.textContent = '\u{1F4CB}'; // 📋
+    button.style.marginLeft = '0.4em';
+    button.style.padding = '0 0.3em';
+    button.style.fontSize = '0.75em';
+    button.style.lineHeight = '1.4';
+    button.style.verticalAlign = 'middle';
+
+    button.addEventListener('click', function () {
+        const text = (textToCopy !== undefined && textToCopy !== null)
+            ? textToCopy
+            : element.textContent;
+        copyTextToClipboard(text)
+            .then(function () {
+                button.textContent = '✓'; // ✓
+                setTimeout(function () {
+                    button.textContent = '\u{1F4CB}';
+                }, 1500);
+            })
+            .catch(function (err) {
+                console.error('[Container] Copy failed:', err);
+            });
+    });
+
+    element.after(button);
+    return button;
+}
+
 function renderConnectionInfo(connection, parent) {
     if (!connection || typeof connection !== "object") {
         let info = document.createElement('small');
@@ -581,6 +639,7 @@ function renderConnectionInfo(connection, parent) {
             let code = document.createElement('code');
             code.textContent = 'nc ' + connection.host + " " + ports;
             parent.append(code);
+            makeCopyable(code);
         } else if (connection.type == "http" || connection.type == "web") {
             for (let internal in connection.ports) {
                 let external = connection.ports[internal];
@@ -595,7 +654,9 @@ function renderConnectionInfo(connection, parent) {
                 let external = connection.ports[internal];
                 let code = document.createElement('code');
                 code.textContent = 'ssh -p ' + external + ' <username>@' + connection.host;
-                parent.append(code, document.createElement('br'));
+                parent.append(code);
+                makeCopyable(code);
+                parent.append(document.createElement('br'));
             }
         } else {
             // Default/Custom
@@ -603,7 +664,9 @@ function renderConnectionInfo(connection, parent) {
                 let external = connection.ports[internal];
                 let code = document.createElement('code');
                 code.textContent = connection.host + ":" + external;
-                parent.append(code, document.createElement('br'));
+                parent.append(code);
+                makeCopyable(code);
+                parent.append(document.createElement('br'));
             }
         }
     } else {
@@ -612,10 +675,12 @@ function renderConnectionInfo(connection, parent) {
             let codeElement = document.createElement('code');
             codeElement.textContent = 'nc ' + connection.host + " " + connection.port;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         } else if (connection.type == "ssh") {
             let codeElement = document.createElement('code');
             codeElement.textContent = 'ssh -p ' + connection.port + ' <username>@' + connection.host;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         } else if (connection.type == "url") {
             let link = document.createElement('a');
             let url = connection.url || ('https://' + connection.host);
@@ -641,10 +706,12 @@ function renderConnectionInfo(connection, parent) {
             let codeElement = document.createElement('code');
             codeElement.textContent = connection.host;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         } else {
             let codeElement = document.createElement('code');
             codeElement.textContent = connection.host + ":" + connection.port;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         }
     }
 

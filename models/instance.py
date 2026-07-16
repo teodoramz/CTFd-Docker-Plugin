@@ -68,7 +68,8 @@ class ContainerInstance(db.Model):
     account_id = db.Column(db.Integer, nullable=False, index=True)
     
     # Docker container info
-    container_id = db.Column(db.String(64), index=True)  # Docker container ID
+    container_id = db.Column(db.String(64), index=True)  # Docker container ID (entry service)
+    container_ids = db.Column(db.JSON)  # All container IDs (compose mode), incl. entry
     
     # Connection info
     connection_host = db.Column(db.String(255))  # Host to connect (IP/hostname)
@@ -146,6 +147,13 @@ class ContainerInstance(db.Model):
         return False
     
     def extend_expiration(self, minutes):
-        """Extend expiration time"""
-        self.expires_at = datetime.utcnow() + timedelta(minutes=minutes)
+        """
+        Extend expiration time by ADDING minutes to the current expiry.
+
+        (Setting expires_at = now + minutes would TRUNCATE the remaining time
+        when a user renews early - e.g. 40 minutes left would become 5.)
+        """
+        now = datetime.utcnow()
+        base = self.expires_at if self.expires_at and self.expires_at > now else now
+        self.expires_at = base + timedelta(minutes=minutes)
         self.renewal_count += 1

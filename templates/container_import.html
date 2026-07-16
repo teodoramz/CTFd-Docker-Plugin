@@ -54,24 +54,57 @@
 
 {% block scripts %}
 <script>
-	// Parse CSV
+	// Parse CSV (RFC 4180-aware: handles quoted fields containing commas,
+	// e.g. capabilities lists like "CHOWN,SETUID,SETGID")
 	function parseCSV(text) {
-		const lines = text.split('\n').filter(line => line.trim());
-		if (lines.length < 2) return [];
+		const records = [];
+		let record = [];
+		let field = '';
+		let inQuotes = false;
 
-		const headers = lines[0].split(',').map(h => h.trim().replace(/['"]/g, ''));
+		for (let i = 0; i < text.length; i++) {
+			const c = text[i];
+			if (inQuotes) {
+				if (c === '"') {
+					if (text[i + 1] === '"') { field += '"'; i++; }
+					else { inQuotes = false; }
+				} else {
+					field += c;
+				}
+			} else if (c === '"') {
+				inQuotes = true;
+			} else if (c === ',') {
+				record.push(field); field = '';
+			} else if (c === '\r' || c === '\n') {
+				if (c === '\r' && text[i + 1] === '\n') i++;
+				record.push(field); field = '';
+				records.push(record); record = [];
+			} else {
+				field += c;
+			}
+		}
+		if (field !== '' || record.length > 0) {
+			record.push(field);
+			records.push(record);
+		}
+
+		if (records.length < 2) return [];
+
+		const headers = records[0].map(h => h.trim().toLowerCase());
 		const rows = [];
-
-		for (let i = 1; i < lines.length; i++) {
-			const values = lines[i].split(',').map(v => v.trim().replace(/^["']|["']$/g, ''));
+		for (let i = 1; i < records.length; i++) {
+			if (records[i].every(v => v.trim() === '')) continue;
 			const row = {};
 			headers.forEach((header, idx) => {
-				row[header] = values[idx] || '';
+				row[header] = (records[i][idx] || '').trim();
 			});
 			if (row.name) rows.push(row);
 		}
-
 		return rows;
+	}
+
+	function parseBool(value) {
+		return ['true', '1', 'yes'].includes(String(value).trim().toLowerCase());
 	}
 
 	// Parse flag pattern
@@ -124,6 +157,45 @@
 			flag_suffix: flag.suffix,
 			random_flag_length: flag.length
 		};
+
+		// Multiple internal ports (comma separated, e.g. "80,22")
+		if (data.internal_ports) {
+			challengeData.internal_ports = data.internal_ports;
+			const firstPort = parseInt(data.internal_ports.split(',')[0]);
+			if (firstPort) challengeData.internal_port = firstPort;
+		}
+
+		// Security capabilities (accept "," or ";" as separator, normalize to upper-case)
+		if (data.capabilities) {
+			challengeData.capabilities = data.capabilities
+				.split(/[,;]/)
+				.map(c => c.trim().toUpperCase())
+				.filter(c => c)
+				.join(',');
+		}
+		// Only send booleans when the cell is non-empty so the model defaults (true) apply otherwise
+		if (data.drop_all_caps !== undefined && data.drop_all_caps !== '') {
+			challengeData.drop_all_caps = parseBool(data.drop_all_caps);
+		}
+		if (data.no_new_privileges !== undefined && data.no_new_privileges !== '') {
+			challengeData.no_new_privileges = parseBool(data.no_new_privileges);
+		}
+		if (data.pids_limit) {
+			challengeData.pids_limit = parseInt(data.pids_limit) || 100;
+		}
+
+		// Per-challenge resource overrides (empty = global defaults)
+		if (data.memory_limit) {
+			challengeData.memory_limit = data.memory_limit;
+		}
+		if (data.cpu_limit && !isNaN(parseFloat(data.cpu_limit))) {
+			challengeData.cpu_limit = parseFloat(data.cpu_limit);
+		}
+
+		// Multi-container mode (quoted multi-line YAML cell)
+		if (data.compose_yaml) {
+			challengeData.compose_yaml = data.compose_yaml;
+		}
 
 		// Scoring
 		if (scoringType === 'dynamic') {
@@ -186,10 +258,10 @@
 				throw new Error('No valid rows found in CSV');
 			}
 
-			// Validate required columns
+			// Validate required columns (image may be omitted in compose mode)
 			const firstRow = rows[0];
-			if (!firstRow.name || !firstRow.category || !firstRow.image) {
-				throw new Error('CSV must have columns: name, category, image');
+			if (!firstRow.name || !firstRow.category || (!firstRow.image && !firstRow.compose_yaml)) {
+				throw new Error('CSV must have columns: name, category and image (or compose_yaml)');
 			}
 
 			// Create challenges

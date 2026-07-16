@@ -137,27 +137,31 @@ def request_container():
         ).count()
         
         if running_count >= max_containers:
+            # Tell the user exactly WHICH challenges hold their slots
+            active_instances = ContainerInstance.query.filter_by(
+                account_id=account_id
+            ).filter(
+                ContainerInstance.status.in_(['running', 'provisioning']),
+                ContainerInstance.expires_at > db.func.now()
+            ).order_by(ContainerInstance.created_at.desc()).all()
+
+            names = []
+            for inst in active_instances:
+                if inst.challenge and getattr(inst.challenge, 'name', None):
+                    names.append(inst.challenge.name)
+                else:
+                    names.append(f'Challenge #{inst.challenge_id}')
+
             if max_containers == 1:
-                active_instance = ContainerInstance.query.filter_by(
-                    account_id=account_id
-                ).filter(
-                    ContainerInstance.status.in_(['running', 'provisioning']),
-                    ContainerInstance.expires_at > db.func.now()
-                ).order_by(ContainerInstance.created_at.desc()).first()
-
-                active_name = 'active containers'
-                if active_instance:
-                    if active_instance.challenge and getattr(active_instance.challenge, 'name', None):
-                        active_name = active_instance.challenge.name
-                    elif getattr(active_instance, 'challenge_id', None):
-                        active_name = f'Challenge #{active_instance.challenge_id}'
-
+                active_name = names[0] if names else 'active containers'
                 return jsonify({
                     'error': f'You have one container running already. Stop "{active_name}" before starting another challenge.'
                 }), 403
 
+            listing = ', '.join(f'"{n}"' for n in names) if names else ''
             return jsonify({
-                'error': f'You have reached the maximum number of concurrent containers ({max_containers})'
+                'error': f'You have reached the maximum number of concurrent containers ({max_containers}).'
+                         + (f' Active: {listing}. Stop one to start another.' if listing else '')
             }), 403
         
         # Create new instance
@@ -183,6 +187,29 @@ def request_container():
             'max_renewals': challenge.get_max_renewals()
         })
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@user_bp.route('/running', methods=['GET'])
+@authed_only
+def list_running():
+    """
+    List challenge IDs for which the current account has an active instance.
+    Used by the challenge board to color tiles with a running container.
+    """
+    try:
+        account_id, _ = get_account_id()
+
+        instances = ContainerInstance.query.filter_by(
+            account_id=account_id
+        ).filter(
+            ContainerInstance.status.in_(RUNNING_LIKE_STATES),
+            ContainerInstance.expires_at > db.func.now()
+        ).all()
+
+        return jsonify({'challenge_ids': [i.challenge_id for i in instances]})
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -215,6 +242,15 @@ def get_container_info(challenge_id):
         if instance and instance.is_expired():
             # Keep DB/container state consistent once the client sees expiration.
             container_service.stop_instance(instance, user_id=None, reason='expired')
+            return jsonify({'status': 'not_found'})
+
+        # Self-heal: the DB says running but the container died/was removed
+        # (crash, OOM-kill with auto_remove, manual docker rm). Only act on a
+        # definitive False - None means Docker is unreachable, don't guess.
+        if (instance and instance.status == 'running' and instance.container_id
+                and container_service
+                and container_service.docker.container_exists(instance.container_id) is False):
+            container_service.stop_instance(instance, user_id=None, reason='died')
             return jsonify({'status': 'not_found'})
 
         if not instance:
@@ -336,11 +372,90 @@ def stop_container():
             return jsonify({'success': True, 'status': 'already_stopped'})
         
         success = container_service.stop_instance(instance, user.id, reason='manual')
-        
+
         if success:
             return jsonify({'success': True})
         else:
             return jsonify({'error': 'Failed to stop container'}), 500
-        
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@user_bp.route('/restart', methods=['POST'])
+@authed_only
+@during_ctf_time_only
+@require_verified_emails
+@ratelimit(method='POST', limit=6, interval=60)
+def restart_container():
+    """
+    Restart container: stop the current instance and provision a fresh one
+    (with a new flag)
+
+    Body:
+        {
+            "challenge_id": 123
+        }
+
+    Response:
+        {
+            "status": "restarted",
+            "instance_uuid": "...",
+            "connection": {...},
+            "expires_at": 1700000000000,
+            "renewal_count": 0,
+            "max_renewals": 3
+        }
+    """
+    try:
+        data = request.get_json()
+        challenge_id = data.get('challenge_id')
+
+        if not challenge_id:
+            return jsonify({'error': 'challenge_id is required'}), 400
+
+        user = get_current_user()
+        account_id, _ = get_account_id()
+
+        # Check if challenge exists
+        challenge = ContainerChallenge.query.get(challenge_id)
+        if not challenge:
+            return jsonify({'error': 'Challenge not found'}), 404
+
+        instance = ContainerInstance.query.filter_by(
+            challenge_id=challenge_id,
+            account_id=account_id
+        ).filter(
+            ContainerInstance.status.in_(ACTIVE_INSTANCE_STATES)
+        ).order_by(ContainerInstance.created_at.desc()).first()
+
+        if instance:
+            # Any reason != 'solved' deletes the temporary flag; restart
+            # generates a fresh flag with the new instance.
+            container_service.stop_instance(instance, user.id, reason='restart')
+
+        # Create fresh instance (raises if the challenge is already solved)
+        instance = container_service.create_instance(
+            challenge_id=challenge_id,
+            account_id=account_id,
+            user_id=user.id
+        )
+
+        return jsonify({
+            'status': 'restarted',
+            'instance_uuid': instance.uuid,
+            'connection': {
+                'host': instance.connection_host,
+                'port': instance.connection_port,
+                'ports': instance.connection_ports,
+                'type': instance.connection_info.get('type') if instance.connection_info else 'ssh',
+                'info': instance.connection_info.get('info') if instance.connection_info else '',
+                'urls': instance.connection_info.get('urls') if instance.connection_info else None
+            },
+            'expires_at': int(instance.expires_at.timestamp() * 1000),
+            'renewal_count': instance.renewal_count,
+            'max_renewals': challenge.get_max_renewals()
+        })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500

@@ -134,6 +134,42 @@
 	<input type="text" class="form-control" name="command" placeholder="/bin/bash -c 'your command'">
 </div>
 
+<div class="form-group">
+	<label>
+		Docker Compose (Optional - Multi-container)<br>
+		<small class="form-text text-muted">
+			Define multiple services that start together per instance (subset: image, command,
+			environment, ports, cap_add, depends_on). Services reach each other by name on a
+			dedicated network. When set, the Image/Port fields above are ignored.
+		</small>
+	</label>
+	<textarea class="form-control" name="compose_yaml" rows="8" style="font-family: monospace;"
+		placeholder="services:&#10;  web:&#10;    image: mychal-web:latest&#10;    ports: [80]&#10;    depends_on: [db]&#10;    environment:&#10;      DB_HOST: db&#10;  db:&#10;    image: mariadb:10.11&#10;    environment:&#10;      MYSQL_ROOT_PASSWORD: secret"></textarea>
+</div>
+
+<!-- Resource Limits -->
+<div class="form-group pt-3 border-top mt-4">
+	<h4>Resource Limits (Optional)</h4>
+	<small class="form-text text-muted mb-2">
+		Per-challenge overrides. Leave empty to use the global defaults from Settings.
+	</small>
+	<div class="row">
+		<div class="col-md-4">
+			<label>Memory Limit</label>
+			<input type="text" class="form-control" name="memory_limit" placeholder="e.g. 512m, 1g">
+		</div>
+		<div class="col-md-4">
+			<label>CPU Limit</label>
+			<input type="number" step="0.1" min="0.1" class="form-control" name="cpu_limit"
+				placeholder="e.g. 0.5">
+		</div>
+		<div class="col-md-4">
+			<label>Max Processes (PIDs)</label>
+			<input type="number" min="1" class="form-control" name="pids_limit" placeholder="100">
+		</div>
+	</div>
+</div>
+
 <!-- Capability Configuration -->
 <div class="form-group pt-3 border-top mt-4">
     <h4>Security & Privileges</h4>

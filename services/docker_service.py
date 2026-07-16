@@ -3,6 +3,8 @@ Docker Service - Manage Docker containers
 """
 import docker
 import logging
+import threading
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -13,18 +15,26 @@ class DockerService:
     Service to interact with Docker daemon
     """
     
-    def __init__(self, base_url='unix://var/run/docker.sock'):
+    def __init__(self, base_url='unix://var/run/docker.sock', deployment_id=None):
         """
         Initialize Docker client
-        
+
         Args:
             base_url: Docker daemon URL
                      - Unix socket: 'unix://var/run/docker.sock' (default)
                      - TCP: 'tcp://192.168.1.100:2376'
                      - SSH: 'ssh://user@host:port' or 'ssh://user@host' (default port 22)
+            deployment_id: Unique ID of this CTFd deployment. Stamped on every
+                     container so multiple CTFd instances can safely share one
+                     Docker host without touching each other's containers.
         """
         self.base_url = base_url
+        self.deployment_id = deployment_id
         self.client = None
+        # Pull-status registry: image name -> {'status', 'detail', 'started_at'}
+        # Guarded by _pull_lock because pulls run in background threads.
+        self._pull_status = {}
+        self._pull_lock = threading.Lock()
         self._connect()
     
     def _connect(self):
@@ -74,7 +84,8 @@ class DockerService:
         name: str = None,
         network: str = None,  # Network to connect for Traefik routing
         use_traefik: bool = False,  # If True, don't expose host port (Traefik handles routing)
-        cap_add=None, cap_drop=None, security_opt=None
+        cap_add=None, cap_drop=None, security_opt=None,
+        network_aliases: list = None  # DNS aliases on the network (compose service names)
     ) -> Dict[str, Any]:
         """
         Create and start a container
@@ -105,8 +116,12 @@ class DockerService:
         """
         if not self.is_connected():
             raise Exception("Docker is not connected")
-        
+
         try:
+            # Fail fast if the image is not present on the Docker host.
+            # docker-py's containers.run() would otherwise pull it inside the
+            # web request, blocking a worker for minutes and freezing the platform.
+            self.client.images.get(image)
 
             # ==========================================
             # SECURITY: CAPABILITIES WHITELIST FILTER
@@ -143,6 +158,8 @@ class DockerService:
                 'ctfd.managed': 'true',
                 'ctfd.plugin': 'containers'
             })
+            if self.deployment_id:
+                container_labels['ctfd.deployment'] = self.deployment_id
             
             # Port mapping - only if not using Traefik
             ports_config = None
@@ -152,9 +169,10 @@ class DockerService:
                     ports_config = {}
                     for internal, external in ports.items():
                         ports_config[f'{internal}/tcp'] = external
-                else:
+                elif internal_port:
                     # Legacy single port mode
                     ports_config = {f'{internal_port}/tcp': host_port}
+                # else: internal-only container (compose helper service) - no published ports
             
             # Network configuration
             network_arg = network if network else 'bridge'
@@ -182,9 +200,19 @@ class DockerService:
                 security_opt=security_opt  # e.g., ['no-new-privileges']
             )
             
+            # Register DNS aliases (compose service names) on the network.
+            # containers.run() cannot set aliases directly, so re-attach.
+            if network and network_aliases:
+                try:
+                    net = self.client.networks.get(network)
+                    net.disconnect(container)
+                    net.connect(container, aliases=network_aliases)
+                except Exception as e:
+                    logger.warning(f"Failed to set network aliases {network_aliases}: {e}")
+
             # No need to manually connect if network arg is used
             logger.info(f"Created container {container.id[:12]} from image {image}")
-            
+
             return {
                 'container_id': container.id,
                 'status': container.status,
@@ -193,7 +221,10 @@ class DockerService:
             
         except docker.errors.ImageNotFound:
             logger.error(f"Docker image not found: {image}")
-            raise Exception(f"Docker image '{image}' not found")
+            raise Exception(
+                f"Docker image '{image}' is not available on the Docker host. "
+                f"Pull it first (docker pull {image})"
+            )
         except docker.errors.APIError as e:
             logger.error(f"Docker API error: {e}")
             raise Exception(f"Failed to create container: {e}")
@@ -214,19 +245,169 @@ class DockerService:
         if not self.is_connected():
             logger.warning("Docker not connected, cannot stop container")
             return False
-        
+
         try:
             container = self.client.containers.get(container_id)
-            container.stop(timeout=3)
-            container.remove()
-            logger.info(f"Stopped and removed container {container_id[:12]}")
-            return True
         except docker.errors.NotFound:
             logger.info(f"Container {container_id[:12]} not found (already removed)")
             return True
         except Exception as e:
+            logger.error(f"Error looking up container {container_id[:12]}: {e}")
+            return False
+
+        try:
+            container.stop(timeout=3)
+        except docker.errors.NotFound:
+            return True
+        except docker.errors.APIError as e:
+            # Containers run with auto_remove=True are removed by the daemon as
+            # soon as they stop, so 404/409 here means the stop already happened.
+            if e.status_code in (404, 409):
+                logger.info(f"Container {container_id[:12]} already stopped/being removed")
+                return True
             logger.error(f"Error stopping container {container_id[:12]}: {e}")
             return False
+        except Exception as e:
+            logger.error(f"Error stopping container {container_id[:12]}: {e}")
+            return False
+
+        # auto_remove handles removal; explicit remove is a fallback and racing
+        # with the daemon's own removal is expected.
+        try:
+            container.remove(force=True)
+        except (docker.errors.NotFound, docker.errors.APIError):
+            pass
+        except Exception as e:
+            logger.warning(f"Error removing container {container_id[:12]}: {e}")
+
+        logger.info(f"Stopped and removed container {container_id[:12]}")
+        return True
+
+    def verify_container_startup(self, container_id: str, wait_seconds: float = 5.0, interval: float = 0.5):
+        """
+        Verify a freshly started container stays up for a short window.
+
+        Catches images/commands that exit immediately (bad entrypoint, missing
+        binary, crash on start) BEFORE the user is shown connection info.
+
+        Args:
+            container_id: Container ID
+            wait_seconds: Observation window
+            interval: Poll interval
+
+        Returns:
+            (ok: bool, detail: str) - detail contains the last log lines when
+            the container died and they could still be read
+        """
+        if not self.is_connected():
+            return True, 'docker unreachable - verification skipped'
+
+        import time
+        deadline = time.time() + wait_seconds
+
+        while True:
+            try:
+                container = self.client.containers.get(container_id)
+            except docker.errors.NotFound:
+                # auto_remove already deleted it - it exited right after start
+                return False, 'container exited immediately and was auto-removed (check image entrypoint/command)'
+            except Exception as e:
+                logger.warning(f"Startup verification skipped for {container_id[:12]}: {e}")
+                return True, f'verification skipped: {e}'
+
+            # 'removing' means it already exited and auto_remove is deleting it
+            if container.status in ('exited', 'dead', 'removing'):
+                logs = ''
+                try:
+                    logs = container.logs(tail=20).decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    pass
+                detail = f"container status '{container.status}'"
+                if logs:
+                    detail += f", last logs: {logs}"
+                return False, detail
+
+            if time.time() >= deadline:
+                return True, container.status
+
+            time.sleep(interval)
+
+    def verify_containers_startup(self, container_ids: list, wait_seconds: float = 5.0, interval: float = 0.5):
+        """
+        Verify a group of freshly started containers (compose instance) all
+        stay up for a short window. Polls the whole group each interval.
+
+        Returns:
+            (ok: bool, detail: str)
+        """
+        if not self.is_connected():
+            return True, 'docker unreachable - verification skipped'
+
+        import time
+        deadline = time.time() + wait_seconds
+
+        while True:
+            for cid in container_ids:
+                try:
+                    container = self.client.containers.get(cid)
+                except docker.errors.NotFound:
+                    return False, f'container {cid[:12]} exited immediately and was auto-removed'
+                except Exception as e:
+                    logger.warning(f"Group startup verification skipped: {e}")
+                    return True, f'verification skipped: {e}'
+
+                if container.status in ('exited', 'dead', 'removing'):
+                    logs = ''
+                    try:
+                        logs = container.logs(tail=20).decode('utf-8', errors='ignore').strip()
+                    except Exception:
+                        pass
+                    detail = f"container {cid[:12]} status '{container.status}'"
+                    if logs:
+                        detail += f", last logs: {logs}"
+                    return False, detail
+
+            if time.time() >= deadline:
+                return True, 'running'
+
+            time.sleep(interval)
+
+    def list_managed_networks(self):
+        """List per-instance networks created by this plugin (label-filtered)"""
+        if not self.is_connected():
+            return []
+        try:
+            networks = self.client.networks.list(filters={'label': 'ctfd.managed=true'})
+            if not self.deployment_id:
+                return [n for n in networks if n.attrs.get('Labels', {}).get('ctfd.instance_uuid')]
+            return [
+                n for n in networks
+                if n.attrs.get('Labels', {}).get('ctfd.instance_uuid')
+                and n.attrs.get('Labels', {}).get('ctfd.deployment') in (None, '', self.deployment_id)
+            ]
+        except Exception as e:
+            logger.error(f"Error listing networks: {e}")
+            return []
+
+    def container_exists(self, container_id: str) -> Optional[bool]:
+        """
+        Check if a container still exists on the Docker host
+
+        Returns:
+            True if it exists, False if it is gone,
+            None if Docker is unreachable (unknown - do not act on it)
+        """
+        if not self.is_connected():
+            return None
+
+        try:
+            self.client.containers.get(container_id)
+            return True
+        except docker.errors.NotFound:
+            return False
+        except Exception as e:
+            logger.error(f"Error checking container {container_id[:12]}: {e}")
+            return None
     
     def get_container_status(self, container_id: str) -> Optional[str]:
         """
@@ -261,12 +442,21 @@ class DockerService:
         """
         if not self.is_connected():
             return []
-        
+
         try:
-            return self.client.containers.list(
+            containers = self.client.containers.list(
                 all=True,
                 filters={'label': 'ctfd.managed=true'}
             )
+            if not self.deployment_id:
+                return containers
+            # Only containers belonging to THIS deployment. Containers without
+            # the label are legacy ones created before the label existed -
+            # treat them as ours (pre-label behavior assumed a single deployment).
+            return [
+                c for c in containers
+                if c.labels.get('ctfd.deployment') in (None, '', self.deployment_id)
+            ]
         except Exception as e:
             logger.error(f"Error listing containers: {e}")
             return []
@@ -287,7 +477,79 @@ class DockerService:
         except Exception as e:
             logger.error(f"Failed to list images: {e}")
             raise Exception(f"Failed to list Docker images: {e}")
-    
+
+    def pull_image_async(self, image: str) -> dict:
+        """
+        Pull a Docker image in a background thread (non-blocking).
+
+        Pulling inside a web request would block a gunicorn worker for
+        minutes, so the pull runs in a daemon thread and its progress is
+        tracked in self._pull_status (poll it via get_pull_status()).
+
+        Args:
+            image: Image name, e.g. 'nginx:latest' or 'nginx'
+
+        Returns:
+            The status entry for this image:
+            {'status': 'pulling'|'done'|'error', 'detail': str, 'started_at': str}
+        """
+        if not self.is_connected():
+            raise Exception("Docker is not connected")
+
+        with self._pull_lock:
+            existing = self._pull_status.get(image)
+            if existing and existing['status'] == 'pulling':
+                # A pull for this image is already in progress - don't start another
+                return dict(existing)
+
+            entry = {
+                'status': 'pulling',
+                'detail': '',
+                'started_at': datetime.utcnow().isoformat()
+            }
+            self._pull_status[image] = entry
+
+        def _do_pull():
+            try:
+                # If the image reference has no tag (no ':' after the last '/'),
+                # pull 'latest' explicitly - otherwise docker pulls ALL tags.
+                if ':' in image.rsplit('/', 1)[-1]:
+                    pulled = self.client.images.pull(image)
+                else:
+                    pulled = self.client.images.pull(image, tag='latest')
+                with self._pull_lock:
+                    self._pull_status[image] = {
+                        'status': 'done',
+                        'detail': getattr(pulled, 'id', str(pulled)),
+                        'started_at': entry['started_at']
+                    }
+                logger.info(f"Pulled image {image}")
+            except Exception as e:
+                with self._pull_lock:
+                    self._pull_status[image] = {
+                        'status': 'error',
+                        'detail': str(e),
+                        'started_at': entry['started_at']
+                    }
+                logger.error(f"Failed to pull image {image}: {e}")
+
+        thread = threading.Thread(target=_do_pull, daemon=True, name=f'image-pull-{image}')
+        thread.start()
+
+        return dict(entry)
+
+    def get_pull_status(self, image: str) -> Optional[dict]:
+        """
+        Get the pull status for an image
+
+        Returns:
+            A copy of the status entry, or None if no pull was started
+        """
+        with self._pull_lock:
+            entry = self._pull_status.get(image)
+            return dict(entry) if entry else None
+
+
     def get_container_logs(self, container_id: str, tail: int = 100) -> Optional[str]:
         """
         Get container logs
@@ -334,22 +596,24 @@ class DockerService:
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
-    def create_network(self, name: str, internal: bool = False, driver: str = 'bridge', options: Dict[str, str] = None) -> bool:
+    def create_network(self, name: str, internal: bool = False, driver: str = 'bridge',
+                       options: Dict[str, str] = None, labels: Dict[str, str] = None) -> bool:
         """
         Create a Docker network
-        
+
         Args:
             name: Network name
             internal: If True, restrict external access
             driver: Network driver (default: bridge)
             options: Driver options (e.g. {'com.docker.network.bridge.enable_icc': 'false'})
-        
+            labels: Extra labels (merged over the management labels)
+
         Returns:
             True if created or already exists, False on error
         """
         if not self.is_connected():
             return False
-            
+
         try:
             # Check if exists
             try:
@@ -357,14 +621,20 @@ class DockerService:
                 return True
             except docker.errors.NotFound:
                 pass
-                
+
+            network_labels = {'ctfd.managed': 'true'}
+            if self.deployment_id:
+                network_labels['ctfd.deployment'] = self.deployment_id
+            if labels:
+                network_labels.update(labels)
+
             self.client.networks.create(
                 name=name,
                 driver=driver,
                 internal=internal,
                 options=options,
                 check_duplicate=True,
-                labels={'ctfd.managed': 'true'}
+                labels=network_labels
             )
             logger.info(f"Created network {name}")
             return True

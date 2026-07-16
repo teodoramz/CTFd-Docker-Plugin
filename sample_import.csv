@@ -1,3 +1,4 @@
-name,category,description,image,internal_port,command,connection_type,connection_info,flag_pattern,scoring_type,value,initial,decay,minimum,decay_function,state
-Web Shell Challenge,Web,Find and exploit the web shell vulnerability to get the flag,nginx:latest,80,,http,Access via browser at http://IP:PORT,CTF{web_sh3ll_<ran_8>},dynamic,,500,20,100,logarithmic,visible
-Simple Static Challenge,Misc,Easy challenge with static flag,alpine:latest,80,,tcp,Just access and get flag,CTF{static_test_flag},standard,50,,,,standard,visible
+name,category,description,image,internal_port,internal_ports,command,connection_type,connection_info,capabilities,drop_all_caps,no_new_privileges,memory_limit,cpu_limit,flag_pattern,scoring_type,value,initial,decay,minimum,decay_function,state
+Web Shell Challenge,Web,Find and exploit the web shell vulnerability to get the flag,nginx:latest,80,,,http,Access via browser at http://IP:PORT,,true,true,,,CTF{web_sh3ll_<ran_8>},dynamic,,500,20,100,logarithmic,visible
+Simple Static Challenge,Misc,Easy challenge with static flag,alpine:latest,80,,,tcp,Just access and get flag,,true,true,,,CTF{static_test_flag},standard,50,,,,standard,visible
+SSH Pwn Challenge,Pwn,SSH in and escalate privileges,ubuntu:20.04,22,,/usr/sbin/sshd -D,ssh,user:ctf pass:ctf,"CHOWN,SETUID,SETGID,SYS_CHROOT,AUDIT_WRITE",true,true,1g,1.0,CTF{<ran_16>},dynamic,,500,20,100,logarithmic,visible

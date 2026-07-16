@@ -815,6 +815,41 @@ class ContainerService:
                     logger.error(f"Error deleting instance: {e}")
                     db.session.rollback()
     
+    def check_infrastructure(self):
+        """
+        Background job: alert admins (Discord webhook) on critical
+        infrastructure problems. Deduplicated via notify_infra cooldowns.
+        """
+        if not self.notification_service:
+            return
+
+        # 1. Docker daemon unreachable
+        if not self.docker or not self.docker.is_connected():
+            self.notification_service.notify_infra(
+                'docker_down',
+                '🔴 Docker Unreachable',
+                'The Docker daemon is not responding - no new challenge instances can start.',
+                fields=[{'name': 'Socket', 'value': str(getattr(self.docker, 'base_url', 'unknown')), 'inline': True}]
+            )
+            return
+
+        # 2. Port pool nearly exhausted
+        try:
+            free = self.port_manager.get_available_count()
+            start, end = self.port_manager._get_port_range()
+            total = end - start + 1
+            if free <= max(5, int(total * 0.05)):
+                self.notification_service.notify_infra(
+                    'ports_low',
+                    '🟠 Port Pool Nearly Exhausted',
+                    f'Only {free} of {total} challenge ports are free. '
+                    'New instances will fail once the pool is empty - consider widening the port range.',
+                    fields=[{'name': 'Free', 'value': str(free), 'inline': True},
+                            {'name': 'Range', 'value': f'{start}-{end}', 'inline': True}]
+                )
+        except Exception as e:
+            logger.warning(f"Infra check (ports) failed: {e}")
+
     def _create_audit_log(self, event_type, **kwargs):
         """Create audit log entry"""
         log = ContainerAuditLog(

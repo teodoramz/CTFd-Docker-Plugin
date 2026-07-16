@@ -1,5 +1,6 @@
 import requests
 import logging
+from datetime import datetime
 from CTFd.models import db
 from ..models.config import ContainerConfig
 
@@ -8,6 +9,27 @@ logger = logging.getLogger(__name__)
 class NotificationService:
     def __init__(self):
         self.webhook_url = None
+        # Cooldown registry for recurring infrastructure alerts
+        # (checked every minute - without this, Discord would be spammed)
+        self._last_alert = {}
+
+    def notify_infra(self, key, title, message, fields=None, cooldown_minutes=15):
+        """
+        Send an infrastructure alert at most once per cooldown window.
+
+        Args:
+            key: Dedup key (e.g. 'docker_down', 'ports_low')
+            title/message/fields: Same as send_alert
+            cooldown_minutes: Minimum minutes between alerts with the same key
+        """
+        now = datetime.utcnow()
+        last = self._last_alert.get(key)
+        if last and (now - last).total_seconds() < cooldown_minutes * 60:
+            return False
+        sent = self.send_alert(title=title, message=message, color=0xff0000, fields=fields)
+        if sent:
+            self._last_alert[key] = now
+        return sent
 
     def _get_webhook_url(self):
         return ContainerConfig.get('container_discord_webhook_url', '')

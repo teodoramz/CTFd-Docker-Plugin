@@ -625,7 +625,13 @@ def _setup_background_jobs(app):
                 minutes=1,
                 id='reconcile_docker'
             )
-            logger.info("Scheduled: recover_stale_instances + reconcile_with_docker (every 1 minute)")
+            scheduler.add_job(
+                func=lambda: _run_with_app_context(app, container_service.check_infrastructure),
+                trigger="interval",
+                minutes=1,
+                id='infra_check'
+            )
+            logger.info("Scheduled: recover_stale_instances + reconcile_with_docker + check_infrastructure (every 1 minute)")
         
         # Cleanup old instances every 1 hour
         if container_service:

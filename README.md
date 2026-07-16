@@ -2,6 +2,17 @@
 
 A comprehensive CTFd plugin that enables dynamic Docker container challenges with advanced features including anti-cheat detection, automatic flag generation, dynamic scoring, and bulk import capabilities.
 
+## Documentation
+
+| Document | Contents |
+|----------|----------|
+| [Admin Guide](./docs/ADMIN_GUIDE.md) | Settings reference, dashboard, dry runs, audit/cheat logs, alerts, operations runbook, troubleshooting |
+| [Challenge Authoring](./docs/CHALLENGE_AUTHORING.md) | Building challenges: flags, capabilities, resource limits, compose, CSV import, pitfalls |
+| [Architecture](./docs/ARCHITECTURE.md) | Components, data model, instance lifecycle, background jobs, anti-cheat internals |
+| [API Reference](./docs/API.md) | Player + admin endpoints |
+| [Subdomain Routing](./SUBDOMAIN_INFO.md) | Traefik + Cloudflare Tunnel setup for per-challenge subdomains |
+| [Changelog](./CHANGELOG.md) | What changed |
+
 ## Features
 
 ### Container Management

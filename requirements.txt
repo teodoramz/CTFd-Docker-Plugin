@@ -3,3 +3,4 @@ paramiko
 apscheduler
 cryptography
 openpyxl
+pyyaml

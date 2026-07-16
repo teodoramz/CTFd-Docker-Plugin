@@ -117,6 +117,22 @@ class ContainerChallengeType(BaseChallenge):
                 mapped_data.pop('cpu_limit')
             else:
                 mapped_data['cpu_limit'] = float(mapped_data['cpu_limit'])
+
+        # Multi-container mode: validate compose and derive fallback fields
+        compose_yaml = str(mapped_data.get('compose_yaml') or '').strip()
+        if compose_yaml:
+            from .services.compose_parser import parse_compose, get_entry_service
+            services = parse_compose(compose_yaml)  # raises with a readable message
+            entry = get_entry_service(services)
+            # image/internal_port are informational in compose mode - fill
+            # them from the entry service so NOT NULL constraints hold
+            if not mapped_data.get('image'):
+                mapped_data['image'] = entry['image']
+            if not mapped_data.get('internal_port'):
+                mapped_data['internal_port'] = entry['ports'][0]
+            mapped_data['compose_yaml'] = compose_yaml
+        else:
+            mapped_data.pop('compose_yaml', None)
         # ==========================================
         
         # Create challenge with mapped data
@@ -175,6 +191,7 @@ class ContainerChallengeType(BaseChallenge):
             "image": challenge.image,
             "internal_port": challenge.internal_port,
             "internal_ports": challenge.internal_ports,
+            "compose_yaml": challenge.compose_yaml,
             "connection_type": challenge.container_connection_type,
             "connection_info": challenge.container_connection_info,
             "timeout_minutes": challenge.timeout_minutes,
@@ -208,7 +225,12 @@ class ContainerChallengeType(BaseChallenge):
             Updated challenge
         """
         data = request.form or request.get_json()
-        
+
+        # Multi-container mode: validate the compose definition up front
+        if str(data.get('compose_yaml') or '').strip():
+            from .services.compose_parser import parse_compose
+            parse_compose(str(data['compose_yaml']))  # raises with a readable message
+
         # Field mapping from UI to DB attributes
         # Note: Some fields have `name=` in column definition for backward compatibility
         field_mapping = {
@@ -230,8 +252,9 @@ class ContainerChallengeType(BaseChallenge):
             # Skip if empty, except fields where empty is a valid value
             # (e.g. clearing all extra capabilities must be possible)
             clearable = ('capabilities', 'internal_ports', 'command', 'container_connection_info')
-            # Empty resource override means "fall back to global config"
-            nullable = ('memory_limit', 'cpu_limit')
+            # Empty means "unset" for these (resource overrides fall back to
+            # global config; clearing compose returns to single-image mode)
+            nullable = ('memory_limit', 'cpu_limit', 'compose_yaml')
             db_attr_early = field_mapping.get(attr, attr)
             if value == '':
                 if db_attr_early in nullable:
@@ -454,7 +477,10 @@ def load(app: Flask):
     
     # Create database tables
     app.db.create_all()
-    
+
+    # Add columns that create_all() cannot add to pre-existing tables
+    _ensure_schema()
+
     # Initialize default config
     _initialize_default_config()
     
@@ -564,6 +590,34 @@ def load(app: Flask):
     _setup_background_jobs(app)
     
     logger.info("Container Challenge Plugin loaded successfully")
+
+
+def _ensure_schema():
+    """
+    Lightweight auto-migration: create_all() does not ALTER existing tables,
+    so plugin upgrades on a live database need explicit ADD COLUMN calls.
+    """
+    from sqlalchemy import inspect, text
+
+    # Resolve table names from the models (ContainerChallenge maps to its own
+    # joined-inheritance table, not to 'challenges')
+    needed = {
+        ContainerChallenge.__table__.name: {'compose_yaml': 'TEXT'},
+        ContainerInstance.__table__.name: {'container_ids': 'JSON'},
+    }
+
+    try:
+        inspector = inspect(db.engine)
+        for table, columns in needed.items():
+            existing = {c['name'] for c in inspector.get_columns(table)}
+            for column, col_type in columns.items():
+                if column not in existing:
+                    db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                    db.session.commit()
+                    logger.info(f"Schema migration: added {table}.{column}")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Schema auto-migration failed: {e}")
 
 
 def _initialize_default_config():

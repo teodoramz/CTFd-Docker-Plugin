@@ -84,7 +84,8 @@ class DockerService:
         name: str = None,
         network: str = None,  # Network to connect for Traefik routing
         use_traefik: bool = False,  # If True, don't expose host port (Traefik handles routing)
-        cap_add=None, cap_drop=None, security_opt=None
+        cap_add=None, cap_drop=None, security_opt=None,
+        network_aliases: list = None  # DNS aliases on the network (compose service names)
     ) -> Dict[str, Any]:
         """
         Create and start a container
@@ -168,9 +169,10 @@ class DockerService:
                     ports_config = {}
                     for internal, external in ports.items():
                         ports_config[f'{internal}/tcp'] = external
-                else:
+                elif internal_port:
                     # Legacy single port mode
                     ports_config = {f'{internal_port}/tcp': host_port}
+                # else: internal-only container (compose helper service) - no published ports
             
             # Network configuration
             network_arg = network if network else 'bridge'
@@ -198,9 +200,19 @@ class DockerService:
                 security_opt=security_opt  # e.g., ['no-new-privileges']
             )
             
+            # Register DNS aliases (compose service names) on the network.
+            # containers.run() cannot set aliases directly, so re-attach.
+            if network and network_aliases:
+                try:
+                    net = self.client.networks.get(network)
+                    net.disconnect(container)
+                    net.connect(container, aliases=network_aliases)
+                except Exception as e:
+                    logger.warning(f"Failed to set network aliases {network_aliases}: {e}")
+
             # No need to manually connect if network arg is used
             logger.info(f"Created container {container.id[:12]} from image {image}")
-            
+
             return {
                 'container_id': container.id,
                 'status': container.status,
@@ -319,6 +331,63 @@ class DockerService:
                 return True, container.status
 
             time.sleep(interval)
+
+    def verify_containers_startup(self, container_ids: list, wait_seconds: float = 5.0, interval: float = 0.5):
+        """
+        Verify a group of freshly started containers (compose instance) all
+        stay up for a short window. Polls the whole group each interval.
+
+        Returns:
+            (ok: bool, detail: str)
+        """
+        if not self.is_connected():
+            return True, 'docker unreachable - verification skipped'
+
+        import time
+        deadline = time.time() + wait_seconds
+
+        while True:
+            for cid in container_ids:
+                try:
+                    container = self.client.containers.get(cid)
+                except docker.errors.NotFound:
+                    return False, f'container {cid[:12]} exited immediately and was auto-removed'
+                except Exception as e:
+                    logger.warning(f"Group startup verification skipped: {e}")
+                    return True, f'verification skipped: {e}'
+
+                if container.status in ('exited', 'dead', 'removing'):
+                    logs = ''
+                    try:
+                        logs = container.logs(tail=20).decode('utf-8', errors='ignore').strip()
+                    except Exception:
+                        pass
+                    detail = f"container {cid[:12]} status '{container.status}'"
+                    if logs:
+                        detail += f", last logs: {logs}"
+                    return False, detail
+
+            if time.time() >= deadline:
+                return True, 'running'
+
+            time.sleep(interval)
+
+    def list_managed_networks(self):
+        """List per-instance networks created by this plugin (label-filtered)"""
+        if not self.is_connected():
+            return []
+        try:
+            networks = self.client.networks.list(filters={'label': 'ctfd.managed=true'})
+            if not self.deployment_id:
+                return [n for n in networks if n.attrs.get('Labels', {}).get('ctfd.instance_uuid')]
+            return [
+                n for n in networks
+                if n.attrs.get('Labels', {}).get('ctfd.instance_uuid')
+                and n.attrs.get('Labels', {}).get('ctfd.deployment') in (None, '', self.deployment_id)
+            ]
+        except Exception as e:
+            logger.error(f"Error listing networks: {e}")
+            return []
 
     def container_exists(self, container_id: str) -> Optional[bool]:
         """
@@ -527,22 +596,24 @@ class DockerService:
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
-    def create_network(self, name: str, internal: bool = False, driver: str = 'bridge', options: Dict[str, str] = None) -> bool:
+    def create_network(self, name: str, internal: bool = False, driver: str = 'bridge',
+                       options: Dict[str, str] = None, labels: Dict[str, str] = None) -> bool:
         """
         Create a Docker network
-        
+
         Args:
             name: Network name
             internal: If True, restrict external access
             driver: Network driver (default: bridge)
             options: Driver options (e.g. {'com.docker.network.bridge.enable_icc': 'false'})
-        
+            labels: Extra labels (merged over the management labels)
+
         Returns:
             True if created or already exists, False on error
         """
         if not self.is_connected():
             return False
-            
+
         try:
             # Check if exists
             try:
@@ -550,14 +621,20 @@ class DockerService:
                 return True
             except docker.errors.NotFound:
                 pass
-                
+
+            network_labels = {'ctfd.managed': 'true'}
+            if self.deployment_id:
+                network_labels['ctfd.deployment'] = self.deployment_id
+            if labels:
+                network_labels.update(labels)
+
             self.client.networks.create(
                 name=name,
                 driver=driver,
                 internal=internal,
                 options=options,
                 check_duplicate=True,
-                labels={'ctfd.managed': 'true'}
+                labels=network_labels
             )
             logger.info(f"Created network {name}")
             return True

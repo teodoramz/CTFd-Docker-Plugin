@@ -1206,6 +1206,20 @@ def import_challenges():
                         return default
                     return str(val).strip().lower() in ('true', '1', 'yes')
 
+                # Multi-container mode: validate compose, derive fallbacks
+                compose_yaml_val = str(row_data.get('compose_yaml') or '').strip()
+                image_val = str(row_data.get('image') or '').strip()
+                internal_port_val = row_data.get('internal_port')
+                if compose_yaml_val:
+                    from ..services.compose_parser import parse_compose, get_entry_service
+                    entry_svc = get_entry_service(parse_compose(compose_yaml_val))
+                    if not image_val:
+                        image_val = entry_svc['image']
+                    if not internal_port_val:
+                        internal_port_val = entry_svc['ports'][0]
+                if not image_val:
+                    raise Exception("'image' is required (or provide compose_yaml)")
+
                 # Create challenge
                 challenge = ContainerChallenge(
                     name=str(row_data['name']),
@@ -1216,8 +1230,9 @@ def import_challenges():
                     type='container',
 
                     # Container fields
-                    image=str(row_data['image']),
-                    internal_port=int(row_data.get('internal_port', 22)),
+                    image=image_val,
+                    compose_yaml=compose_yaml_val or None,
+                    internal_port=int(internal_port_val or 22),
                     internal_ports=str(row_data.get('internal_ports') or ''),
                     command=str(row_data.get('command', '')),
                     container_connection_type=str(row_data.get('connection_type', 'ssh')),

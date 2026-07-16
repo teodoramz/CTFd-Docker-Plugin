@@ -23,6 +23,14 @@ class ContainerChallenge(Challenges):
     internal_ports = db.Column(db.Text, default="")  # Comma separated list of ports: "80,22"
     command = db.Column(db.Text, default="")
 
+    # Multi-container mode: docker-compose subset (see services/compose_parser.py).
+    # When set, it takes precedence over image/internal_port(s)/command.
+    compose_yaml = db.Column(db.Text, nullable=True)
+
+    def is_compose(self):
+        """Challenge uses the multi-container (compose) mode"""
+        return bool(self.compose_yaml and self.compose_yaml.strip())
+
     capabilities = db.Column(db.Text, default="")
     drop_all_caps = db.Column(db.Boolean, default=True)
     no_new_privileges = db.Column(db.Boolean, default=True)

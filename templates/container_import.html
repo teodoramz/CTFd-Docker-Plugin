@@ -192,6 +192,11 @@
 			challengeData.cpu_limit = parseFloat(data.cpu_limit);
 		}
 
+		// Multi-container mode (quoted multi-line YAML cell)
+		if (data.compose_yaml) {
+			challengeData.compose_yaml = data.compose_yaml;
+		}
+
 		// Scoring
 		if (scoringType === 'dynamic') {
 			challengeData.initial = parseInt(data.initial) || 500;
@@ -253,10 +258,10 @@
 				throw new Error('No valid rows found in CSV');
 			}
 
-			// Validate required columns
+			// Validate required columns (image may be omitted in compose mode)
 			const firstRow = rows[0];
-			if (!firstRow.name || !firstRow.category || !firstRow.image) {
-				throw new Error('CSV must have columns: name, category, image');
+			if (!firstRow.name || !firstRow.category || (!firstRow.image && !firstRow.compose_yaml)) {
+				throw new Error('CSV must have columns: name, category and image (or compose_yaml)');
 			}
 
 			// Create challenges

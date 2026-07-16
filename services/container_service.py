@@ -183,9 +183,14 @@ class ContainerService:
         db.session.commit()
         
         try:
+            # Multi-container (compose) challenges take a dedicated path
+            if challenge.is_compose():
+                self._provision_compose(instance, challenge, flag)
+                return
+
             # Get config
             from ..models.config import ContainerConfig
-            
+
             # Check if subdomain routing is enabled
             subdomain_enabled = ContainerConfig.get('subdomain_enabled', 'false').lower() == 'true'
             subdomain_base_domain = ContainerConfig.get('subdomain_base_domain', '')
@@ -481,6 +486,140 @@ class ContainerService:
             db.session.commit()
             raise
     
+    def _provision_compose(self, instance: ContainerInstance, challenge: ContainerChallenge, flag: str):
+        """
+        Provision a multi-container (compose) instance:
+        - dedicated bridge network per instance (services reach each other by name)
+        - services started in dependency order
+        - published ports allocated from the port manager
+        - FLAG env + {FLAG} substitution in every service
+        """
+        import re
+        from ..models.config import ContainerConfig
+        from .compose_parser import parse_compose, get_entry_service
+
+        services = parse_compose(challenge.compose_yaml)
+        entry = get_entry_service(services)
+
+        network_name = f"ctfd-inst-{instance.uuid[:8]}"
+        if not self.docker.create_network(
+            name=network_name,
+            driver='bridge',
+            labels={'ctfd.instance_uuid': instance.uuid}
+        ):
+            raise Exception(f"Failed to create instance network {network_name}")
+
+        # Allocate host ports for every published container port.
+        # connection_ports keys are 'service:port' (two services may both use 80).
+        publish = [(svc['name'], port) for svc in services for port in svc['ports']]
+        allocated = self.port_manager.allocate_ports(len(publish))
+        ports_map = {}
+        per_service_ports = {}
+        for (svc_name, port), host_port in zip(publish, allocated):
+            ports_map[f"{svc_name}:{port}"] = host_port
+            per_service_ports.setdefault(svc_name, {})[str(port)] = host_port
+
+        safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
+
+        security_options = []
+        if getattr(challenge, 'no_new_privileges', True):
+            security_options.append('no-new-privileges:true')
+
+        container_ids = []
+        entry_container_id = None
+        try:
+            for svc in services:
+                env = {k: v.replace('{FLAG}', flag) for k, v in svc['environment'].items()}
+                env['FLAG'] = flag
+
+                command = svc['command']
+                if isinstance(command, str) and '{FLAG}' in command:
+                    command = command.replace('{FLAG}', flag)
+
+                labels = {
+                    'ctfd.instance_uuid': instance.uuid,
+                    'ctfd.challenge_id': str(challenge.id),
+                    'ctfd.account_id': str(instance.account_id),
+                    'ctfd.expires_at': str(instance.expires_at.timestamp()),
+                    'ctfd.service': svc['name'],
+                }
+
+                result = self.docker.create_container(
+                    image=svc['image'],
+                    ports=per_service_ports.get(svc['name']),
+                    command=command,
+                    environment=env,
+                    memory_limit=challenge.get_memory_limit(),
+                    cpu_limit=challenge.get_cpu_limit(),
+                    pids_limit=challenge.pids_limit,
+                    name=f"{safe_name}_{instance.account_id}_{instance.uuid[:8]}_{svc['name']}",
+                    labels=labels,
+                    network=network_name,
+                    network_aliases=[svc['name']],
+                    cap_add=svc['cap_add'] or None,
+                    cap_drop=['ALL'] if getattr(challenge, 'drop_all_caps', True) else None,
+                    security_opt=security_options if security_options else None
+                )
+                container_ids.append(result['container_id'])
+                if svc['name'] == entry['name']:
+                    entry_container_id = result['container_id']
+
+            ok, detail = self.docker.verify_containers_startup(container_ids)
+            if not ok:
+                raise NonRetryableProvisionError(f"Compose service failed to start: {detail}")
+
+        except Exception:
+            # Roll back the partial deployment: containers + network
+            for cid in container_ids:
+                try:
+                    self.docker.stop_container(cid)
+                except Exception:
+                    pass
+            self.docker.remove_network(network_name)
+            raise
+
+        # Success: update instance
+        instance.container_id = entry_container_id
+        instance.container_ids = container_ids
+        instance.connection_host = ContainerConfig.get('connection_host', 'localhost')
+        instance.connection_port = ports_map[f"{entry['name']}:{entry['ports'][0]}"]
+        instance.connection_ports = ports_map
+        instance.connection_info = {
+            'type': challenge.container_connection_type,
+            'info': challenge.container_connection_info
+        }
+        instance.status = 'running'
+        instance.started_at = datetime.utcnow()
+        db.session.commit()
+
+        # Schedule expiration in Redis (for accurate killing)
+        try:
+            from .. import redis_expiration_service
+            if redis_expiration_service:
+                expires_in_seconds = int((instance.expires_at - datetime.utcnow()).total_seconds())
+                redis_expiration_service.schedule_expiration(instance.uuid, expires_in_seconds)
+        except Exception as e:
+            logger.warning(f"Failed to schedule Redis expiration: {e}")
+
+        logger.info(
+            f"Provisioned compose instance {instance.uuid} "
+            f"({len(container_ids)} services on {network_name})"
+        )
+
+        self._create_audit_log(
+            'instance_started',
+            instance_id=instance.id,
+            challenge_id=challenge.id,
+            account_id=instance.account_id,
+            details={
+                'compose': True,
+                'services': [s['name'] for s in services],
+                'ports': ports_map,
+                'network': network_name
+            }
+        )
+        db.session.commit()
+
     def renew_instance(self, instance: ContainerInstance, user_id: int) -> ContainerInstance:
         """
         Renew (extend) container expiration
@@ -568,11 +707,25 @@ class ContainerService:
             logger.warning(f"Failed to cancel Redis expiration: {e}")
         
         try:
-            # Stop Docker container. stop_container() returns True when the
+            # Stop Docker container(s). stop_container() returns True when the
             # container was stopped OR is already gone; False means it is
             # likely still running - do NOT mark the instance stopped then,
             # otherwise the container is orphaned and keeps running.
-            if instance.container_id:
+            if instance.container_ids:
+                # Compose instance: stop every service, then remove its network
+                failed = [
+                    cid for cid in instance.container_ids
+                    if not self.docker.stop_container(cid)
+                ]
+                if failed:
+                    raise Exception(
+                        "Docker failed to stop containers: "
+                        + ', '.join(c[:12] for c in failed)
+                    )
+                # auto_remove may still be detaching containers; if removal
+                # fails now, the reconcile job cleans the network up later
+                self.docker.remove_network(f"ctfd-inst-{instance.uuid[:8]}")
+            elif instance.container_id:
                 if not self.docker.stop_container(instance.container_id):
                     raise Exception(
                         f"Docker failed to stop container {instance.container_id[:12]}"
@@ -742,13 +895,15 @@ class ContainerService:
             logger.error(f"Reconcile: failed to list containers: {e}")
             return
 
-        live_uuids = set()
+        live_counts = {}
         for container in containers:
             container_uuid = container.labels.get('ctfd.instance_uuid')
             if container_uuid:
-                live_uuids.add(container_uuid)
+                live_counts[container_uuid] = live_counts.get(container_uuid, 0) + 1
 
-        # 1. Running instances whose container is gone -> mark stopped
+        # 1. Running instances with missing containers -> mark stopped.
+        # For compose instances a single dead service breaks the challenge,
+        # so anything less than the full set counts as died.
         running = ContainerInstance.query.filter(
             ContainerInstance.status == 'running'
         ).all()
@@ -760,10 +915,11 @@ class ContainerService:
         active_uuids = set()
         for instance in running:
             active_uuids.add(instance.uuid)
-            if (instance.uuid not in live_uuids
+            expected = len(instance.container_ids) if instance.container_ids else 1
+            if (live_counts.get(instance.uuid, 0) < expected
                     and instance.started_at
                     and instance.started_at < grace):
-                logger.warning(f"Container for instance {instance.uuid} died unexpectedly - marking stopped")
+                logger.warning(f"Container(s) for instance {instance.uuid} died unexpectedly - marking stopped")
                 try:
                     self.stop_instance(instance, user_id=None, reason='died')
                 except Exception as e:
@@ -789,7 +945,18 @@ class ContainerService:
                     container.remove(force=True)
                 except Exception:
                     pass
-    
+
+        # 3. Per-instance (compose) networks with no active instance -> remove
+        for network in self.docker.list_managed_networks():
+            network_uuid = network.attrs.get('Labels', {}).get('ctfd.instance_uuid')
+            if network_uuid and network_uuid not in active_uuids:
+                try:
+                    network.remove()
+                    logger.info(f"Removed orphaned network {network.name}")
+                except Exception:
+                    # Still has containers attached (being removed) - next run
+                    pass
+
     def cleanup_old_instances(self):
         """
         Background job: Delete old stopped/error instances

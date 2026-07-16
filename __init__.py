@@ -101,6 +101,22 @@ class ContainerChallengeType(BaseChallenge):
             mapped_data['drop_all_caps'] = str(mapped_data['drop_all_caps']).lower() in ['true', '1', 'yes']
         if 'no_new_privileges' in mapped_data:
             mapped_data['no_new_privileges'] = str(mapped_data['no_new_privileges']).lower() in ['true', '1', 'yes']
+
+        # Convert numeric fields (forms send strings; empty means "use default")
+        int_fields = ('container_initial', 'container_minimum', 'container_decay',
+                      'internal_port', 'timeout_minutes', 'max_renewals',
+                      'random_flag_length', 'pids_limit', 'value')
+        for key in int_fields:
+            if key in mapped_data:
+                if mapped_data[key] in ('', None):
+                    mapped_data.pop(key)
+                else:
+                    mapped_data[key] = int(mapped_data[key])
+        if 'cpu_limit' in mapped_data:
+            if mapped_data['cpu_limit'] in ('', None):
+                mapped_data.pop('cpu_limit')
+            else:
+                mapped_data['cpu_limit'] = float(mapped_data['cpu_limit'])
         # ==========================================
         
         # Create challenge with mapped data

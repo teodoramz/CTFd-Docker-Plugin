@@ -67,6 +67,7 @@ class NotificationService:
         ]
         
         return self.send_alert(
+            title="⚠️ Container System Error",
             message="An error occurred in the container system.",
             color=0xffa500, # Orange
             fields=fields

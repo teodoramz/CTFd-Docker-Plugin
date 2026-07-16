@@ -1,0 +1,80 @@
+# Release pipeline
+#
+# How to cut a release:
+#   git tag v1.2.0
+#   git push origin v1.2.0
+#
+# The workflow validates the sources, packages the plugin as containers.zip
+# (already wrapped in the required `containers/` folder, so it can be
+# extracted straight into CTFd/plugins/) and publishes a GitHub Release with
+# auto-generated notes.
+#
+# A manual run (workflow_dispatch) builds and uploads the zip as a build
+# artifact without creating a release - useful for testing the packaging.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile Python sources
+        run: python -m compileall -q __init__.py migration.py models routes services
+
+      - name: Syntax-check JavaScript assets
+        run: |
+          for f in assets/*.js; do
+            node --check "$f"
+          done
+
+      - name: Validate sample CSV
+        run: |
+          python -c "import csv; rows = list(csv.reader(open('sample_import.csv'))); assert len(rows) >= 2 and 'name' in rows[0] and len({len(r) for r in rows if r}) == 1, 'sample_import.csv malformed'; print(f'sample CSV ok: {len(rows) - 1} rows, {len(rows[0])} columns')"
+
+  package:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build plugin archive (containers.zip)
+        run: |
+          mkdir -p dist/containers
+          rsync -a \
+            --exclude '.git*' \
+            --exclude '.data' \
+            --exclude 'dist' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            ./ dist/containers/
+          cd dist
+          zip -qr containers.zip containers
+          unzip -l containers.zip | tail -3
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: containers-plugin
+          path: dist/containers.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/containers.zip
+          generate_release_notes: true

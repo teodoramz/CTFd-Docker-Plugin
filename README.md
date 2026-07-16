@@ -6,6 +6,7 @@ A comprehensive CTFd plugin that enables dynamic Docker container challenges wit
 
 ### Container Management
 - **Dynamic Container Spawning**: Each team/user gets their own isolated Docker container
+- **Multi-Container Challenges (docker-compose)**: Define several services per challenge (e.g. web + database); each instance gets a dedicated network with service-name DNS
 - **Automatic Lifecycle Management**: Containers auto-expire after configurable timeout
 - **Startup Verification**: A container that crashes right after start fails provisioning with its log lines instead of being shown to the player
 - **Self-Healing**: Every minute the plugin reconciles the database with Docker — dead containers are cleaned up, orphaned containers are removed, stuck instances are recovered
@@ -202,6 +203,37 @@ Challenge images must be present on the Docker host **before** instances can sta
    - **Dynamic**: Initial value, decay rate, minimum value, decay function
 ![alt text](./image-readme/score.png)
 
+### Multi-Container Challenges (docker-compose)
+
+For challenges that need several containers (e.g. a web app + its database), fill the **Docker Compose** field instead of the single Image/Port fields. A safe subset of compose is supported:
+
+```yaml
+services:
+  web:
+    image: mychal-web:latest
+    ports: ["80"]            # published to the player via an allocated port
+    depends_on: [db]
+    cap_add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE]
+    environment:
+      DB_HOST: db            # services reach each other by service name
+      APP_FLAG: "{FLAG}"     # {FLAG} is substituted everywhere
+  db:
+    image: mariadb:10.11
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+```
+
+How it works per instance:
+- A **dedicated bridge network** is created (`ctfd-inst-<uuid>`); services resolve each other by name; instances of different teams cannot reach each other
+- Services start in **dependency order** (`depends_on`), each with the standard hardening (drop-all capabilities + per-service `cap_add` whitelist, no-new-privileges, memory/CPU/PIDs limits)
+- The `FLAG` environment variable is injected into **every** service, and `{FLAG}` placeholders in commands/environment are substituted
+- Only container ports listed under `ports:` are published (host side is allocated automatically); at least one service must publish a port
+- On stop/expire/solve, **all** service containers and the instance network are removed; the reconcile job cleans up any leftovers
+
+**Supported service keys**: `image` (tagged, required), `command`, `environment`, `ports`, `cap_add`, `depends_on` — anything else (`volumes`, `privileged`, `network_mode`, `build`, ...) is rejected at save time. Max 5 services.
+
+The CSV import also accepts a `compose_yaml` column (quote the multi-line YAML); `image` may then be left empty.
+
 ### Via CSV Import
 
 1. **Go to:** Admin → Containers → Import
@@ -332,7 +364,7 @@ Every event the plugin records — instance lifecycle (created/started/renewed/s
 - [x] Challenge dry-run testing from admin
 - [x] Audit log browser + CSV exports
 - [x] Health dashboard & infrastructure alerts
-- [ ] Support docker compose file for challenge creation (multi-container challenges)
+- [x] Support docker compose file for challenge creation (multi-container challenges)
 - [ ] Prometheus metrics endpoint
 - [ ] Multi-host Docker backend (spread instances across several daemons)
 

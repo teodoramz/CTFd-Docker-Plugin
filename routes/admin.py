@@ -224,11 +224,74 @@ def cheats():
     # Get Docker status
     connected, docker_info = _get_docker_status()
     
-    return render_template('container_cheat.html', 
-                         cheat_logs=cheat_logs, 
-                         connected=connected, 
+    return render_template('container_cheat.html',
+                         cheat_logs=cheat_logs,
+                         connected=connected,
                          docker_info=docker_info,
                          active_page='cheats')
+
+
+@admin_bp.route('/audit')
+@admins_only
+def audit_log():
+    """Audit log - all container events"""
+    from CTFd.utils import get_config
+
+    # Get filters from request
+    event_type = request.args.get("event_type", "").strip()
+    severity = request.args.get("severity", "").strip()
+    account_id = request.args.get("account_id", type=int)
+    challenge_id = request.args.get("challenge_id", type=int)
+    page = abs(request.args.get("page", 1, type=int))
+
+    # Base query
+    query = ContainerAuditLog.query
+
+    # Apply filters
+    if event_type:
+        query = query.filter_by(event_type=event_type)
+
+    if severity:
+        query = query.filter_by(severity=severity)
+
+    if account_id:
+        query = query.filter_by(account_id=account_id)
+
+    if challenge_id:
+        query = query.filter_by(challenge_id=challenge_id)
+
+    logs = query.order_by(ContainerAuditLog.timestamp.desc()).paginate(page=page, per_page=50)
+
+    # Distinct event types for the filter dropdown
+    event_types = [row[0] for row in db.session.query(ContainerAuditLog.event_type).distinct().all()]
+    severities = ['info', 'warning', 'error', 'critical']
+
+    # Get all challenges for the filter dropdown and name lookup
+    all_challenges = ContainerChallenge.query.all()
+    challenge_names = {c.id: c.name for c in all_challenges}
+
+    # Get Docker status
+    connected, docker_info = _get_docker_status()
+
+    # Check if teams mode
+    is_teams_mode = get_config('user_mode') == 'teams'
+
+    return render_template('container_audit.html',
+                         logs=logs,
+                         event_types=event_types,
+                         severities=severities,
+                         all_challenges=all_challenges,
+                         challenge_names=challenge_names,
+                         connected=connected,
+                         docker_info=docker_info,
+                         is_teams_mode=is_teams_mode,
+                         active_page='audit',
+                         filters={
+                             'event_type': event_type,
+                             'severity': severity,
+                             'account_id': account_id,
+                             'challenge_id': challenge_id
+                         })
 
 
 # ============================================================================

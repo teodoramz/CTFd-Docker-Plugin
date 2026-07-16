@@ -39,8 +39,8 @@ class ContainerChallenge(Challenges):
         name="connection_info"
     )  # Extra info to display
     
-    # Resource limits (deprecated - use global config)
-    # Kept for backward compatibility, but values are ignored
+    # Resource limits - per-challenge override; empty/NULL falls back to
+    # the global config values (Admin -> Containers -> Settings)
     memory_limit = db.Column(db.String(20), nullable=True)
     cpu_limit = db.Column(db.Float, nullable=True)
     pids_limit = db.Column(db.Integer, default=100)
@@ -61,12 +61,16 @@ class ContainerChallenge(Challenges):
         return int(ContainerConfig.get('max_renewals', '3'))
     
     def get_memory_limit(self):
-        """Get memory limit from global config"""
+        """Get memory limit: per-challenge override, else global config"""
+        if self.memory_limit:
+            return self.memory_limit
         from ..models.config import ContainerConfig
         return ContainerConfig.get('max_memory', '512m')
-    
+
     def get_cpu_limit(self):
-        """Get CPU limit from global config"""
+        """Get CPU limit: per-challenge override, else global config"""
+        if self.cpu_limit:
+            return float(self.cpu_limit)
         from ..models.config import ContainerConfig
         return float(ContainerConfig.get('max_cpu', '0.5'))
     

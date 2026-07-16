@@ -184,6 +184,14 @@
 			challengeData.pids_limit = parseInt(data.pids_limit) || 100;
 		}
 
+		// Per-challenge resource overrides (empty = global defaults)
+		if (data.memory_limit) {
+			challengeData.memory_limit = data.memory_limit;
+		}
+		if (data.cpu_limit && !isNaN(parseFloat(data.cpu_limit))) {
+			challengeData.cpu_limit = parseFloat(data.cpu_limit);
+		}
+
 		// Scoring
 		if (scoringType === 'dynamic') {
 			challengeData.initial = parseInt(data.initial) || 500;

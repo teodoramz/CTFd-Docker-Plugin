@@ -155,6 +155,31 @@
 	<input type="text" class="form-control" name="command" value="{{ challenge.command }}">
 </div>
 
+<!-- Resource Limits -->
+<div class="form-group pt-3 border-top mt-4">
+	<h4>Resource Limits (Optional)</h4>
+	<small class="form-text text-muted mb-2">
+		Per-challenge overrides. Leave empty to use the global defaults from Settings.
+	</small>
+	<div class="row">
+		<div class="col-md-4">
+			<label>Memory Limit</label>
+			<input type="text" class="form-control" name="memory_limit" placeholder="e.g. 512m, 1g"
+				value="{{ challenge.memory_limit | default('', true) }}">
+		</div>
+		<div class="col-md-4">
+			<label>CPU Limit</label>
+			<input type="number" step="0.1" min="0.1" class="form-control" name="cpu_limit"
+				placeholder="e.g. 0.5" value="{{ challenge.cpu_limit | default('', true) }}">
+		</div>
+		<div class="col-md-4">
+			<label>Max Processes (PIDs)</label>
+			<input type="number" min="1" class="form-control" name="pids_limit" placeholder="100"
+				value="{{ challenge.pids_limit | default(100, true) }}">
+		</div>
+	</div>
+</div>
+
 <!-- Capability Configuration -->
 <div class="form-group pt-3 border-top mt-4">
     <h4>Security & Privileges</h4>

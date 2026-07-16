@@ -1009,6 +1009,10 @@ def import_challenges():
                     drop_all_caps=parse_bool(row_data.get('drop_all_caps'), default=True),
                     no_new_privileges=parse_bool(row_data.get('no_new_privileges'), default=True),
 
+                    # Per-challenge resource overrides (empty = global defaults)
+                    memory_limit=str(row_data.get('memory_limit')).strip() if row_data.get('memory_limit') else None,
+                    cpu_limit=float(row_data.get('cpu_limit')) if row_data.get('cpu_limit') else None,
+
                     # Flag fields
                     flag_mode=flag_mode,
                     flag_prefix=flag_prefix,
@@ -1067,6 +1071,7 @@ def download_template():
             'name', 'category', 'description', 'image', 'internal_port', 'internal_ports',
             'command', 'connection_type', 'connection_info',
             'capabilities', 'drop_all_caps', 'no_new_privileges',
+            'memory_limit', 'cpu_limit',
             'flag_pattern', 'scoring_type', 'value',
             'initial', 'decay', 'minimum', 'decay_function', 'state'
         ]
@@ -1086,6 +1091,8 @@ def download_template():
                 'capabilities': '',
                 'drop_all_caps': 'true',
                 'no_new_privileges': 'true',
+                'memory_limit': '',
+                'cpu_limit': '',
                 'flag_pattern': 'CTF{static_flag}',
                 'scoring_type': 'standard',
                 'value': '100',
@@ -1108,6 +1115,8 @@ def download_template():
                 'capabilities': 'CHOWN,SETUID,SETGID,SYS_CHROOT,AUDIT_WRITE',
                 'drop_all_caps': 'true',
                 'no_new_privileges': 'true',
+                'memory_limit': '1g',
+                'cpu_limit': '1.0',
                 'flag_pattern': 'CTF{<ran_16>}',
                 'scoring_type': 'dynamic',
                 'value': '',

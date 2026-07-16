@@ -185,6 +185,9 @@ class ContainerChallengeType(BaseChallenge):
             "drop_all_caps": challenge.drop_all_caps,
             "no_new_privileges": challenge.no_new_privileges,
             "pids_limit": challenge.pids_limit,
+            # Per-challenge resource overrides (empty = global config)
+            "memory_limit": challenge.memory_limit,
+            "cpu_limit": challenge.cpu_limit,
             # Dynamic scoring
             "initial": challenge.container_initial,
             "minimum": challenge.container_minimum,
@@ -227,8 +230,15 @@ class ContainerChallengeType(BaseChallenge):
             # Skip if empty, except fields where empty is a valid value
             # (e.g. clearing all extra capabilities must be possible)
             clearable = ('capabilities', 'internal_ports', 'command', 'container_connection_info')
-            if value == '' and field_mapping.get(attr, attr) not in clearable:
-                continue
+            # Empty resource override means "fall back to global config"
+            nullable = ('memory_limit', 'cpu_limit')
+            db_attr_early = field_mapping.get(attr, attr)
+            if value == '':
+                if db_attr_early in nullable:
+                    setattr(challenge, db_attr_early, None)
+                    continue
+                if db_attr_early not in clearable:
+                    continue
             
             # Map field name to actual attribute
             db_attr = field_mapping.get(attr, attr)

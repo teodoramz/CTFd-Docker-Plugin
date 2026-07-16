@@ -191,6 +191,29 @@ def request_container():
         return jsonify({'error': str(e)}), 500
 
 
+@user_bp.route('/running', methods=['GET'])
+@authed_only
+def list_running():
+    """
+    List challenge IDs for which the current account has an active instance.
+    Used by the challenge board to color tiles with a running container.
+    """
+    try:
+        account_id, _ = get_account_id()
+
+        instances = ContainerInstance.query.filter_by(
+            account_id=account_id
+        ).filter(
+            ContainerInstance.status.in_(RUNNING_LIKE_STATES),
+            ContainerInstance.expires_at > db.func.now()
+        ).all()
+
+        return jsonify({'challenge_ids': [i.challenge_id for i in instances]})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @user_bp.route('/info/<int:challenge_id>', methods=['GET'])
 @authed_only
 @during_ctf_time_only

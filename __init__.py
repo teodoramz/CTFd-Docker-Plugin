@@ -6,7 +6,7 @@ Spawn Docker containers cho challenges với anti-cheat system
 import math
 import logging
 from flask import Flask
-from CTFd.plugins import register_plugin_assets_directory
+from CTFd.plugins import register_plugin_assets_directory, register_plugin_script
 from CTFd.plugins.challenges import CHALLENGE_CLASSES, BaseChallenge
 from CTFd.models import db, Solves
 from CTFd.utils.modes import get_model
@@ -529,6 +529,9 @@ def load(app: Flask):
     register_plugin_assets_directory(
         app, base_path="/plugins/containers/assets/"
     )
+
+    # Global script: colors challenge-board tiles that have a running instance
+    register_plugin_script('/plugins/containers/assets/board.js')
     
     # Register template folder
     from jinja2 import FileSystemLoader, ChoiceLoader

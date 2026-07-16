@@ -95,11 +95,17 @@ function enableButtons() {
     if (restartBtnEnable) restartBtnEnable.disabled = false;
 }
 
+function notifyBoard() {
+    // Tells board.js (challenge tiles coloring) to refresh instance states
+    document.dispatchEvent(new CustomEvent('containers:changed'));
+}
+
 function toggleChallengeCreate() {
     const btn = document.getElementById("create-chal");
     if (btn) {
         btn.classList.remove('d-none');
     }
+    notifyBoard();
 }
 
 function hideChallengeCreate() {
@@ -116,6 +122,7 @@ function toggleChallengeUpdate() {
     if (extendBtn) extendBtn.classList.remove('d-none');
     if (restartBtn) restartBtn.classList.remove('d-none');
     if (terminateBtn) terminateBtn.classList.remove('d-none');
+    notifyBoard();
 }
 
 function hideChallengeUpdate() {

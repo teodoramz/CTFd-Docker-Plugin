@@ -34,6 +34,29 @@ class ContainerService:
         self.port_manager = port_manager
         self.notification_service = notification_service
         self._cleanup_running = False  # Prevent overlapping cleanup jobs
+        # Global provisioning throttle: bounds how many containers this worker
+        # provisions at once, so a stampede of "Fetch Instance" clicks at CTF
+        # start cannot overwhelm the Docker host.
+        import threading
+        self._provision_lock = threading.Lock()
+        self._provisions_in_flight = 0
+
+    def _acquire_provision_slot(self) -> bool:
+        from ..models.config import ContainerConfig
+        try:
+            limit = int(ContainerConfig.get('max_concurrent_provisions', 4))
+        except (TypeError, ValueError):
+            limit = 4
+        with self._provision_lock:
+            if self._provisions_in_flight >= limit:
+                return False
+            self._provisions_in_flight += 1
+            return True
+
+    def _release_provision_slot(self):
+        with self._provision_lock:
+            if self._provisions_in_flight > 0:
+                self._provisions_in_flight -= 1
     
     def create_instance(self, challenge_id: int, account_id: int, user_id: int) -> ContainerInstance:
         """
@@ -64,6 +87,20 @@ class ContainerService:
         
         if already_solved:
             raise Exception("Challenge already solved - cannot create new instance")
+
+        # Global provisioning throttle (checked before creating any DB records)
+        if not self._acquire_provision_slot():
+            raise Exception(
+                "The platform is starting many containers right now - "
+                "please try again in a few seconds"
+            )
+        try:
+            return self._create_instance_inner(challenge_id, account_id, user_id, challenge)
+        finally:
+            self._release_provision_slot()
+
+    def _create_instance_inner(self, challenge_id: int, account_id: int, user_id: int, challenge) -> ContainerInstance:
+        """Body of create_instance, executed while holding a provision slot"""
         
         # 3. Check if already has running instance
         existing = ContainerInstance.query.filter_by(

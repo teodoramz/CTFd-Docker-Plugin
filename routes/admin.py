@@ -173,6 +173,7 @@ def settings():
         'subdomain_base_domain': ContainerConfig.get('subdomain_base_domain', ''),
         'subdomain_network': ContainerConfig.get('subdomain_network', 'ctfd-network'),
         'container_max_concurrent_count': ContainerConfig.get('container_max_concurrent_count', '3'),
+        'max_concurrent_provisions': ContainerConfig.get('max_concurrent_provisions', '4'),
         'container_discord_webhook_url': ContainerConfig.get('container_discord_webhook_url', ''),
     }
     

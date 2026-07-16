@@ -169,6 +169,17 @@
 			</div>
 
 			<div class="form-group">
+				<label for="max_concurrent_provisions">Max Simultaneous Provisions (global)</label>
+				<input class="form-control" type="number" name="max_concurrent_provisions"
+					id="max_concurrent_provisions" placeholder="4" min="1"
+					value="{{ settings.max_concurrent_provisions }}">
+				<small class="form-text text-muted">
+					How many containers the platform starts at the same time. Extra requests get a
+					"try again in a few seconds" message - protects the Docker host from start-of-CTF stampedes.
+				</small>
+			</div>
+
+			<div class="form-group">
 				<label for="container_discord_webhook_url">Discord Webhook URL</label>
 				<input class="form-control" type="text" name="container_discord_webhook_url"
 					id="container_discord_webhook_url" placeholder="https://discord.com/api/webhooks/..."

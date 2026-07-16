@@ -1,23 +1,15 @@
-First packaged release of this fork.
+Changes on top of the original plugin ([phannhat17/CTFd-Docker-Plugin](https://github.com/phannhat17/CTFd-Docker-Plugin)):
 
-## What the plugin provides
+## Added
 
-- **Container challenge type** for CTFd: each user/team gets an isolated Docker container per challenge, with automatic expiration, renewals and a per-account instance limit
-- **Flags**: static or per-team random flags (`CTF{prefix_<ran_N>}`), delivered to the container via the `FLAG` environment variable
-- **Anti-cheat**: submitting another team's flag is detected and both accounts are banned automatically, with a dedicated admin log
-- **Scoring**: standard or dynamic (linear / logarithmic decay)
-- **Security hardening per challenge**: drop-all Linux capabilities with a server-side whitelist for re-added ones, `no-new-privileges`, memory/CPU/PIDs limits
-- **Docker connectivity**: local socket or remote host over SSH
-- **Subdomain routing** (optional): per-instance subdomains via Traefik + Cloudflare Tunnel instead of host:port
-- **Precise expiration** via Redis keyspace notifications, with a polling fallback
-- **Admin tooling**: instance dashboard with filters and emergency stop, plugin settings page, cheat log, CSV bulk import of challenges
-- Fix for importing CTFd backups that contain container challenge data (datetime handling)
+- **Per-challenge Linux capabilities control**: challenges drop ALL Docker capabilities by default and can re-add only what the image needs, chosen from a checkbox grid in the challenge create/update forms. The selection is enforced server-side against a whitelist — anything else is dropped and logged. A `no-new-privileges` toggle is included (on by default).
+- **CI pipeline**: Python and JavaScript sources are validated on every push and pull request.
+- **Release pipeline**: tagged versions (`v*`) are validated, packaged and published automatically as a GitHub Release with the `containers.zip` asset — already wrapped in the `containers/` folder, so it extracts straight into `CTFd/plugins/` with no renaming.
 
-## New in this release
+## Fixed
 
-- **CI pipeline**: Python/JavaScript sources validated on every push and pull request
-- **Release pipeline**: tagged versions are validated, packaged and published automatically
-- **`containers.zip`** asset: already wrapped in the `containers/` folder — extract it straight into `CTFd/plugins/`, no renaming needed
+- **Importing a CTFd export backup** containing container challenge data no longer breaks: timestamps that arrive as strings from the import are now safely converted back to datetimes (`SafeDateTime` column type).
+- **Dynamic scoring fields** (`initial`/`decay`/`minimum`) are correctly mapped for container challenges, fixing the capabilities-era database mismatch.
 
 ## Installation
 

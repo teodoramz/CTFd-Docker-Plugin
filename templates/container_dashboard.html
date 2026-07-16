@@ -48,6 +48,61 @@
 	</div>
 </div>
 
+{% if health.ports_low or health.errors_high %}
+<div class="alert alert-danger">
+	<i class="fas fa-exclamation-triangle mr-1"></i>
+	{% if health.ports_low %}
+	<strong>Port pool nearly exhausted:</strong> only {{ health.ports_free }} of {{ health.ports_total }} ports free —
+	widen the range in Settings.
+	{% endif %}
+	{% if health.errors_high %}
+	<strong>High error rate:</strong> {{ health.errors_1h }} provisioning errors in the last hour — check images and
+	Docker host.
+	{% endif %}
+</div>
+{% endif %}
+
+<div class="row mb-4">
+	<div class="col-md-3">
+		<div class="card text-center">
+			<div class="card-body py-3">
+				<h3 class="mb-0 text-success">{{ running_count }}</h3>
+				<small class="text-muted text-uppercase">Running now</small>
+			</div>
+		</div>
+	</div>
+	<div class="col-md-3">
+		<div class="card text-center">
+			<div class="card-body py-3">
+				<h3 class="mb-0">{{ total_count }}</h3>
+				<small class="text-muted text-uppercase">Total instances</small>
+			</div>
+		</div>
+	</div>
+	<div class="col-md-3">
+		<div class="card text-center">
+			<div class="card-body py-3">
+				<h3 class="mb-0 {{ 'text-danger' if health.errors_1h > 0 else 'text-muted' }}">{{ health.errors_1h }}</h3>
+				<small class="text-muted text-uppercase">Errors (last hour)</small>
+				<div class="small text-muted">{{ health.starts_1h }} successful starts</div>
+			</div>
+		</div>
+	</div>
+	<div class="col-md-3">
+		<div class="card text-center">
+			<div class="card-body py-3">
+				{% if health.ports_free is not none %}
+				<h3 class="mb-0 {{ 'text-danger' if health.ports_low else 'text-info' }}">{{ health.ports_free }}</h3>
+				<small class="text-muted text-uppercase">Free ports / {{ health.ports_total }}</small>
+				{% else %}
+				<h3 class="mb-0 text-muted">—</h3>
+				<small class="text-muted text-uppercase">Free ports</small>
+				{% endif %}
+			</div>
+		</div>
+	</div>
+</div>
+
 <style>
 	.badge-pulsing i {
 		animation: pulsing 1.5s infinite;

@@ -125,18 +125,51 @@ def dashboard():
     # Get stats
     total_count = ContainerInstance.query.count()
     running_count = ContainerInstance.query.filter_by(status='running').count()
-    
+
+    # Health stats: provisioning errors in the last hour + free ports
+    from datetime import datetime, timedelta
+    hour_ago = datetime.utcnow() - timedelta(hours=1)
+    errors_1h = ContainerInstance.query.filter(
+        ContainerInstance.status == 'error',
+        ContainerInstance.created_at > hour_ago
+    ).count()
+    starts_1h = ContainerAuditLog.query.filter(
+        ContainerAuditLog.event_type == 'instance_started',
+        ContainerAuditLog.timestamp > hour_ago
+    ).count()
+
+    ports_free = None
+    ports_total = None
+    if container_service:
+        try:
+            ports_free = container_service.port_manager.get_available_count()
+            p_start, p_end = container_service.port_manager._get_port_range()
+            ports_total = p_end - p_start + 1
+        except Exception:
+            pass
+
+    health = {
+        'errors_1h': errors_1h,
+        'starts_1h': starts_1h,
+        'ports_free': ports_free,
+        'ports_total': ports_total,
+        'ports_low': (ports_free is not None and ports_total
+                      and ports_free <= max(5, int(ports_total * 0.10))),
+        'errors_high': errors_1h >= 5,
+    }
+
     # Get Docker status
     connected, docker_info = _get_docker_status()
-    
+
     # Check if teams mode
     is_teams_mode = get_config('user_mode') == 'teams'
-    
+
     return render_template('container_dashboard.html',
                          instances=instances,
                          all_challenges=all_challenges,
                          running_count=running_count,
                          total_count=total_count,
+                         health=health,
                          connected=connected,
                          docker_info=docker_info,
                          is_teams_mode=is_teams_mode,

@@ -30,14 +30,16 @@ def get_team_filter(team_id):
 docker_service = None
 container_service = None
 anticheat_service = None
+flag_service = None
 
 
-def set_services(d_service, c_service, a_service):
+def set_services(d_service, c_service, a_service, f_service=None):
     """Inject services"""
-    global docker_service, container_service, anticheat_service
+    global docker_service, container_service, anticheat_service, flag_service
     docker_service = d_service
     container_service = c_service
     anticheat_service = a_service
+    flag_service = f_service
 
 
 # ============================================================================
@@ -1004,6 +1006,65 @@ def test_notification():
         else:
              return jsonify({'error': 'Failed to send notification. Check server logs.'}), 400
              
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@admin_bp.route('/api/challenges/<int:challenge_id>/test', methods=['POST'], endpoint='api_challenge_test')
+@admins_only
+def test_challenge(challenge_id):
+    """
+    Dry run a challenge: spin up an instance under the current admin's account
+    and return connection info, the generated flag and the first log lines.
+
+    The resulting instance is a normal instance owned by the admin's account -
+    it appears in the dashboard and can be stopped with the existing controls.
+    """
+    try:
+        import time
+        from CTFd.utils import get_config as get_ctfd_config
+        from CTFd.utils.user import get_current_user
+
+        user = get_current_user()
+        if not user:
+            return jsonify({'error': 'User not authenticated'}), 403
+
+        # Compute account id the same way the user routes do
+        if get_ctfd_config('user_mode') == 'teams':
+            if not user.team_id:
+                return jsonify({'error': 'You must be on a team to test challenges in teams mode'}), 400
+            account_id = user.team_id
+        else:
+            account_id = user.id
+
+        instance = container_service.create_instance(challenge_id, account_id, user.id)
+
+        # Give the container a moment to boot, then grab the first log lines
+        time.sleep(1)
+        logs = None
+        try:
+            if docker_service and instance.container_id:
+                logs = docker_service.get_container_logs(instance.container_id, tail=20)
+        except Exception:
+            logs = None
+
+        flag = None
+        if flag_service and instance.flag_encrypted:
+            flag = flag_service.decrypt_flag(instance.flag_encrypted)
+
+        return jsonify({
+            'success': True,
+            'instance_uuid': instance.uuid,
+            'connection': {
+                'host': instance.connection_host,
+                'port': instance.connection_port,
+                'ports': instance.connection_ports
+            },
+            'expires_at': instance.expires_at.isoformat() if instance.expires_at else None,
+            'flag': flag,
+            'logs': logs
+        })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -550,7 +550,7 @@ def load(app: Flask):
     
     # Inject services into routes
     set_user_services(container_service, flag_service, anticheat_service)
-    set_admin_services(docker_service, container_service, anticheat_service)
+    set_admin_services(docker_service, container_service, anticheat_service, flag_service)
     
     # Register blueprints
     app.register_blueprint(user_bp)

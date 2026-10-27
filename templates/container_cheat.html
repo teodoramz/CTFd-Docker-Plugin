@@ -6,6 +6,18 @@
 
 {% block panel %}
 
+	<div class="d-flex justify-content-between align-items-center mb-3">
+		<h4 class="mb-0">Cheat Log</h4>
+		<div class="btn-group">
+			<button type="button" class="btn btn-outline-secondary btn-sm" onclick="location.reload()">
+				<i class="fas fa-sync-alt"></i> Refresh
+			</button>
+			<a href="{{ url_for('containers_admin.cheats_export') }}" class="btn btn-outline-secondary btn-sm">
+				<i class="fas fa-download"></i> Export CSV
+			</a>
+		</div>
+	</div>
+
 	{% if cheat_logs and cheat_logs|length > 0 %}
 	<div class="alert alert-warning">
 		<strong>Warning:</strong> {{ cheat_logs|length }} flag sharing attempt(s) detected

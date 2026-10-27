@@ -30,14 +30,16 @@ def get_team_filter(team_id):
 docker_service = None
 container_service = None
 anticheat_service = None
+flag_service = None
 
 
-def set_services(d_service, c_service, a_service):
+def set_services(d_service, c_service, a_service, f_service=None):
     """Inject services"""
-    global docker_service, container_service, anticheat_service
+    global docker_service, container_service, anticheat_service, flag_service
     docker_service = d_service
     container_service = c_service
     anticheat_service = a_service
+    flag_service = f_service
 
 
 # ============================================================================
@@ -125,18 +127,51 @@ def dashboard():
     # Get stats
     total_count = ContainerInstance.query.count()
     running_count = ContainerInstance.query.filter_by(status='running').count()
-    
+
+    # Health stats: provisioning errors in the last hour + free ports
+    from datetime import datetime, timedelta
+    hour_ago = datetime.utcnow() - timedelta(hours=1)
+    errors_1h = ContainerInstance.query.filter(
+        ContainerInstance.status == 'error',
+        ContainerInstance.created_at > hour_ago
+    ).count()
+    starts_1h = ContainerAuditLog.query.filter(
+        ContainerAuditLog.event_type == 'instance_started',
+        ContainerAuditLog.timestamp > hour_ago
+    ).count()
+
+    ports_free = None
+    ports_total = None
+    if container_service:
+        try:
+            ports_free = container_service.port_manager.get_available_count()
+            p_start, p_end = container_service.port_manager._get_port_range()
+            ports_total = p_end - p_start + 1
+        except Exception:
+            pass
+
+    health = {
+        'errors_1h': errors_1h,
+        'starts_1h': starts_1h,
+        'ports_free': ports_free,
+        'ports_total': ports_total,
+        'ports_low': (ports_free is not None and ports_total
+                      and ports_free <= max(5, int(ports_total * 0.10))),
+        'errors_high': errors_1h >= 5,
+    }
+
     # Get Docker status
     connected, docker_info = _get_docker_status()
-    
+
     # Check if teams mode
     is_teams_mode = get_config('user_mode') == 'teams'
-    
+
     return render_template('container_dashboard.html',
                          instances=instances,
                          all_challenges=all_challenges,
                          running_count=running_count,
                          total_count=total_count,
+                         health=health,
                          connected=connected,
                          docker_info=docker_info,
                          is_teams_mode=is_teams_mode,
@@ -173,6 +208,7 @@ def settings():
         'subdomain_base_domain': ContainerConfig.get('subdomain_base_domain', ''),
         'subdomain_network': ContainerConfig.get('subdomain_network', 'ctfd-network'),
         'container_max_concurrent_count': ContainerConfig.get('container_max_concurrent_count', '3'),
+        'max_concurrent_provisions': ContainerConfig.get('max_concurrent_provisions', '4'),
         'container_discord_webhook_url': ContainerConfig.get('container_discord_webhook_url', ''),
     }
     
@@ -224,11 +260,183 @@ def cheats():
     # Get Docker status
     connected, docker_info = _get_docker_status()
     
-    return render_template('container_cheat.html', 
-                         cheat_logs=cheat_logs, 
-                         connected=connected, 
+    return render_template('container_cheat.html',
+                         cheat_logs=cheat_logs,
+                         connected=connected,
                          docker_info=docker_info,
                          active_page='cheats')
+
+
+@admin_bp.route('/audit')
+@admins_only
+def audit_log():
+    """Audit log - all container events"""
+    from CTFd.utils import get_config
+
+    # Get filters from request
+    event_type = request.args.get("event_type", "").strip()
+    severity = request.args.get("severity", "").strip()
+    account_id = request.args.get("account_id", type=int)
+    challenge_id = request.args.get("challenge_id", type=int)
+    page = abs(request.args.get("page", 1, type=int))
+
+    # Base query
+    query = ContainerAuditLog.query
+
+    # Apply filters
+    if event_type:
+        query = query.filter_by(event_type=event_type)
+
+    if severity:
+        query = query.filter_by(severity=severity)
+
+    if account_id:
+        query = query.filter_by(account_id=account_id)
+
+    if challenge_id:
+        query = query.filter_by(challenge_id=challenge_id)
+
+    logs = query.order_by(ContainerAuditLog.timestamp.desc()).paginate(page=page, per_page=50)
+
+    # Distinct event types for the filter dropdown
+    event_types = [row[0] for row in db.session.query(ContainerAuditLog.event_type).distinct().all()]
+    severities = ['info', 'warning', 'error', 'critical']
+
+    # Get all challenges for the filter dropdown and name lookup
+    all_challenges = ContainerChallenge.query.all()
+    challenge_names = {c.id: c.name for c in all_challenges}
+
+    # Get Docker status
+    connected, docker_info = _get_docker_status()
+
+    # Check if teams mode
+    is_teams_mode = get_config('user_mode') == 'teams'
+
+    return render_template('container_audit.html',
+                         logs=logs,
+                         event_types=event_types,
+                         severities=severities,
+                         all_challenges=all_challenges,
+                         challenge_names=challenge_names,
+                         connected=connected,
+                         docker_info=docker_info,
+                         is_teams_mode=is_teams_mode,
+                         active_page='audit',
+                         filters={
+                             'event_type': event_type,
+                             'severity': severity,
+                             'account_id': account_id,
+                             'challenge_id': challenge_id
+                         })
+
+
+@admin_bp.route('/audit/export')
+@admins_only
+def audit_log_export():
+    """Export audit log as CSV (honours the same filters as the audit page)"""
+    from flask import make_response
+    import csv
+    import io
+    import json
+
+    # Get filters from request (same as audit_log)
+    event_type = request.args.get("event_type", "").strip()
+    severity = request.args.get("severity", "").strip()
+    account_id = request.args.get("account_id", type=int)
+    challenge_id = request.args.get("challenge_id", type=int)
+
+    # Base query
+    query = ContainerAuditLog.query
+
+    # Apply filters
+    if event_type:
+        query = query.filter_by(event_type=event_type)
+
+    if severity:
+        query = query.filter_by(severity=severity)
+
+    if account_id:
+        query = query.filter_by(account_id=account_id)
+
+    if challenge_id:
+        query = query.filter_by(challenge_id=challenge_id)
+
+    logs = query.order_by(ContainerAuditLog.timestamp.desc()).limit(10000).all()
+
+    # Challenge name lookup
+    challenge_names = {c.id: c.name for c in ContainerChallenge.query.all()}
+
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'timestamp', 'event_type', 'severity', 'challenge_id', 'challenge_name',
+        'account_id', 'user_id', 'instance_id', 'ip_address', 'details'
+    ])
+
+    for log in logs:
+        writer.writerow([
+            log.timestamp.strftime('%Y-%m-%d %H:%M:%S') if log.timestamp else '',
+            log.event_type,
+            log.severity or '',
+            log.challenge_id if log.challenge_id is not None else '',
+            challenge_names.get(log.challenge_id, ''),
+            log.account_id if log.account_id is not None else '',
+            log.user_id if log.user_id is not None else '',
+            log.instance_id if log.instance_id is not None else '',
+            log.ip_address or '',
+            json.dumps(log.details, separators=(',', ':')) if log.details else ''
+        ])
+
+    # Create response
+    response = make_response(output.getvalue())
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = 'attachment; filename=container_audit_log.csv'
+
+    return response
+
+
+@admin_bp.route('/cheats/export')
+@admins_only
+def cheats_export():
+    """Export cheat detection log as CSV"""
+    from flask import make_response
+    import csv
+    import io
+
+    cheat_logs = ContainerFlagAttempt.query.filter(
+        ContainerFlagAttempt.is_cheating == True
+    ).order_by(ContainerFlagAttempt.timestamp.desc()).limit(10000).all()
+
+    # Challenge name lookup
+    challenge_names = {c.id: c.name for c in ContainerChallenge.query.all()}
+
+    # Build CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        'timestamp', 'challenge_id', 'challenge_name', 'cheater_account_id',
+        'cheater_user_id', 'flag_owner_account_id', 'submitted_flag_hash', 'ip_address'
+    ])
+
+    for log in cheat_logs:
+        writer.writerow([
+            log.timestamp.strftime('%Y-%m-%d %H:%M:%S') if log.timestamp else '',
+            log.challenge_id if log.challenge_id is not None else '',
+            challenge_names.get(log.challenge_id, ''),
+            log.account_id if log.account_id is not None else '',
+            log.user_id if log.user_id is not None else '',
+            log.flag_owner_account_id if log.flag_owner_account_id is not None else '',
+            log.submitted_flag_hash or '',
+            log.ip_address or ''
+        ])
+
+    # Create response
+    response = make_response(output.getvalue())
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = 'attachment; filename=container_cheat_log.csv'
+
+    return response
 
 
 # ============================================================================
@@ -649,6 +857,54 @@ def list_images():
         return jsonify({'error': str(e)}), 500
 
 
+@admin_bp.route('/api/images/pull', methods=['POST'], endpoint='api_images_pull')
+@admins_only
+def pull_image():
+    """
+    Start pulling a Docker image in the background (non-blocking).
+
+    JSON body: {'image': 'name:tag'}
+    Poll /api/images/pull-status?image=name:tag for progress.
+    """
+    try:
+        if not docker_service:
+            return jsonify({'error': 'Docker service not available'}), 500
+
+        data = request.get_json(silent=True) or {}
+        image = data.get('image')
+        if not isinstance(image, str) or not image.strip():
+            return jsonify({'error': 'Image name is required'}), 400
+        image = image.strip()
+
+        if not docker_service.is_connected():
+            return jsonify({'error': 'Docker is not connected. Check the connection settings.'}), 400
+
+        status_entry = docker_service.pull_image_async(image)
+        return jsonify({'success': True, **status_entry})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@admin_bp.route('/api/images/pull-status', methods=['GET'], endpoint='api_images_pull_status')
+@admins_only
+def pull_image_status():
+    """Get the status of a background image pull (query param: image)"""
+    try:
+        if not docker_service:
+            return jsonify({'error': 'Docker service not available'}), 500
+
+        image = (request.args.get('image') or '').strip()
+        if not image:
+            return jsonify({'error': 'Image name is required'}), 400
+
+        status = docker_service.get_pull_status(image)
+        if status is None:
+            return jsonify({'status': 'unknown'})
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @admin_bp.route('/api/docker/health', methods=['GET'], endpoint='api_docker_health')
 @admins_only
 def docker_health_check():
@@ -750,6 +1006,80 @@ def test_notification():
         else:
              return jsonify({'error': 'Failed to send notification. Check server logs.'}), 400
              
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@admin_bp.route('/api/challenges/<int:challenge_id>/test', methods=['POST'], endpoint='api_challenge_test')
+@admins_only
+def test_challenge(challenge_id):
+    """
+    Dry run a challenge: spin up an instance under the current admin's account
+    and return connection info, the generated flag and the first log lines.
+
+    The resulting instance is a normal instance owned by the admin's account -
+    it appears in the dashboard and can be stopped with the existing controls.
+    """
+    try:
+        import time
+        from CTFd.utils import get_config as get_ctfd_config
+        from CTFd.utils.user import get_current_user
+
+        user = get_current_user()
+        if not user:
+            return jsonify({'error': 'User not authenticated'}), 403
+
+        # Compute account id the same way the user routes do
+        if get_ctfd_config('user_mode') == 'teams':
+            if not user.team_id:
+                return jsonify({'error': 'You must be on a team to test challenges in teams mode'}), 400
+            account_id = user.team_id
+        else:
+            account_id = user.id
+
+        instance = container_service.create_instance(challenge_id, account_id, user.id)
+
+        # Give the container a moment to boot, then grab the first log lines
+        time.sleep(1)
+        logs = None
+        try:
+            if docker_service and instance.container_id:
+                logs = docker_service.get_container_logs(instance.container_id, tail=20)
+        except Exception:
+            logs = None
+
+        # Belt-and-braces: if the container died after startup verification
+        # (slow-crashing image), report the test as FAILED instead of showing
+        # connection info to a corpse.
+        if (docker_service and instance.container_id
+                and docker_service.container_exists(instance.container_id) is False):
+            try:
+                container_service.stop_instance(instance, user.id, reason='died')
+            except Exception:
+                pass
+            return jsonify({
+                'error': 'Container died right after start - the image/command does not work '
+                         'with this challenge configuration (check capabilities and limits)',
+                'logs': logs
+            }), 500
+
+        flag = None
+        if flag_service and instance.flag_encrypted:
+            flag = flag_service.decrypt_flag(instance.flag_encrypted)
+
+        return jsonify({
+            'success': True,
+            'instance_uuid': instance.uuid,
+            'connection': {
+                'host': instance.connection_host,
+                'port': instance.connection_port,
+                'ports': instance.connection_ports
+            },
+            'expires_at': instance.expires_at.isoformat() if instance.expires_at else None,
+            'flag': flag,
+            'logs': logs
+        })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -865,6 +1195,31 @@ def import_challenges():
                     container_decay = None
                     container_minimum = None
                 
+                # Parse security capabilities
+                raw_caps = str(row_data.get('capabilities') or '')
+                capabilities = ','.join(
+                    c.strip().upper() for c in re.split(r'[,;]', raw_caps) if c.strip()
+                )
+
+                def parse_bool(val, default=True):
+                    if val is None or str(val).strip() == '':
+                        return default
+                    return str(val).strip().lower() in ('true', '1', 'yes')
+
+                # Multi-container mode: validate compose, derive fallbacks
+                compose_yaml_val = str(row_data.get('compose_yaml') or '').strip()
+                image_val = str(row_data.get('image') or '').strip()
+                internal_port_val = row_data.get('internal_port')
+                if compose_yaml_val:
+                    from ..services.compose_parser import parse_compose, get_entry_service
+                    entry_svc = get_entry_service(parse_compose(compose_yaml_val))
+                    if not image_val:
+                        image_val = entry_svc['image']
+                    if not internal_port_val:
+                        internal_port_val = entry_svc['ports'][0]
+                if not image_val:
+                    raise Exception("'image' is required (or provide compose_yaml)")
+
                 # Create challenge
                 challenge = ContainerChallenge(
                     name=str(row_data['name']),
@@ -873,14 +1228,25 @@ def import_challenges():
                     value=value,
                     state=str(row_data.get('state', 'visible')),
                     type='container',
-                    
+
                     # Container fields
-                    image=str(row_data['image']),
-                    internal_port=int(row_data.get('internal_port', 22)),
+                    image=image_val,
+                    compose_yaml=compose_yaml_val or None,
+                    internal_port=int(internal_port_val or 22),
+                    internal_ports=str(row_data.get('internal_ports') or ''),
                     command=str(row_data.get('command', '')),
                     container_connection_type=str(row_data.get('connection_type', 'ssh')),
                     container_connection_info=str(row_data.get('connection_info', '')),
-                    
+
+                    # Security capabilities
+                    capabilities=capabilities,
+                    drop_all_caps=parse_bool(row_data.get('drop_all_caps'), default=True),
+                    no_new_privileges=parse_bool(row_data.get('no_new_privileges'), default=True),
+
+                    # Per-challenge resource overrides (empty = global defaults)
+                    memory_limit=str(row_data.get('memory_limit')).strip() if row_data.get('memory_limit') else None,
+                    cpu_limit=float(row_data.get('cpu_limit')) if row_data.get('cpu_limit') else None,
+
                     # Flag fields
                     flag_mode=flag_mode,
                     flag_prefix=flag_prefix,
@@ -936,12 +1302,14 @@ def download_template():
         
         # CSV headers
         headers = [
-            'name', 'category', 'description', 'image', 'internal_port',
+            'name', 'category', 'description', 'image', 'internal_port', 'internal_ports',
             'command', 'connection_type', 'connection_info',
+            'capabilities', 'drop_all_caps', 'no_new_privileges',
+            'memory_limit', 'cpu_limit',
             'flag_pattern', 'scoring_type', 'value',
             'initial', 'decay', 'minimum', 'decay_function', 'state'
         ]
-        
+
         # Example rows
         examples = [
             {
@@ -950,9 +1318,15 @@ def download_template():
                 'description': 'Find the flag',
                 'image': 'nginx:latest',
                 'internal_port': '80',
+                'internal_ports': '',
                 'command': '',
                 'connection_type': 'http',
                 'connection_info': 'Access via browser',
+                'capabilities': '',
+                'drop_all_caps': 'true',
+                'no_new_privileges': 'true',
+                'memory_limit': '',
+                'cpu_limit': '',
                 'flag_pattern': 'CTF{static_flag}',
                 'scoring_type': 'standard',
                 'value': '100',
@@ -968,9 +1342,15 @@ def download_template():
                 'description': 'SSH and find flag',
                 'image': 'ubuntu:20.04',
                 'internal_port': '22',
+                'internal_ports': '',
                 'command': '/usr/sbin/sshd -D',
                 'connection_type': 'ssh',
                 'connection_info': 'user:ctf pass:ctf',
+                'capabilities': 'CHOWN,SETUID,SETGID,SYS_CHROOT,AUDIT_WRITE',
+                'drop_all_caps': 'true',
+                'no_new_privileges': 'true',
+                'memory_limit': '1g',
+                'cpu_limit': '1.0',
                 'flag_pattern': 'CTF{<ran_16>}',
                 'scoring_type': 'dynamic',
                 'value': '',

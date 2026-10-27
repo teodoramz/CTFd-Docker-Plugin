@@ -89,7 +89,7 @@ class PortManager:
             logger.warning(f"Failed to get Redis client: {e}")
             return None
 
-    def lock_port(self, port: int, ttl: int = 5) -> bool:
+    def lock_port(self, port: int, ttl: int = 60) -> bool:
         """
         Try to lock a port using Redis
         
@@ -153,8 +153,9 @@ class PortManager:
     def release_port(self, port: int):
         """Release port lock"""
         logger.info(f"Released port {port}")
-        # Lock expires automatically via TTL, but we could explicitly delete
-        # Redis key if we wanted. Since TTL is short (5s), auto-expire is fine.
+        # The Redis lock expires automatically via TTL (60s, covering the whole
+        # provisioning window incl. startup verification); after that the port
+        # is tracked purely via active instances in the database.
     
     def get_available_count(self) -> int:
         """Get number of available ports"""

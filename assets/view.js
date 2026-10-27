@@ -81,6 +81,8 @@ function resetAlert() {
     document.getElementById("create-chal").disabled = true;
     document.getElementById("extend-chal").disabled = true;
     document.getElementById("terminate-chal").disabled = true;
+    const restartBtnReset = document.getElementById("restart-chal");
+    if (restartBtnReset) restartBtnReset.disabled = true;
 
     return alert;
 }
@@ -89,6 +91,13 @@ function enableButtons() {
     document.getElementById("create-chal").disabled = false;
     document.getElementById("extend-chal").disabled = false;
     document.getElementById("terminate-chal").disabled = false;
+    const restartBtnEnable = document.getElementById("restart-chal");
+    if (restartBtnEnable) restartBtnEnable.disabled = false;
+}
+
+function notifyBoard() {
+    // Tells board.js (challenge tiles coloring) to refresh instance states
+    document.dispatchEvent(new CustomEvent('containers:changed'));
 }
 
 function toggleChallengeCreate() {
@@ -96,6 +105,7 @@ function toggleChallengeCreate() {
     if (btn) {
         btn.classList.remove('d-none');
     }
+    notifyBoard();
 }
 
 function hideChallengeCreate() {
@@ -107,15 +117,20 @@ function hideChallengeCreate() {
 
 function toggleChallengeUpdate() {
     const extendBtn = document.getElementById("extend-chal");
+    const restartBtn = document.getElementById("restart-chal");
     const terminateBtn = document.getElementById("terminate-chal");
     if (extendBtn) extendBtn.classList.remove('d-none');
+    if (restartBtn) restartBtn.classList.remove('d-none');
     if (terminateBtn) terminateBtn.classList.remove('d-none');
+    notifyBoard();
 }
 
 function hideChallengeUpdate() {
     const extendBtn = document.getElementById("extend-chal");
+    const restartBtn = document.getElementById("restart-chal");
     const terminateBtn = document.getElementById("terminate-chal");
     if (extendBtn) extendBtn.classList.add('d-none');
+    if (restartBtn) restartBtn.classList.add('d-none');
     if (terminateBtn) terminateBtn.classList.add('d-none');
 }
 
@@ -338,6 +353,75 @@ function container_stop(challenge_id) {
         .finally(enableButtons);
 }
 
+function container_restart(challenge_id) {
+    if (containerRequestInFlight) {
+        return;
+    }
+    containerRequestInFlight = true;
+
+    let alert = resetAlert();
+
+    fetch("/api/v1/containers/restart", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "CSRF-Token": init.csrfNonce
+        },
+        body: JSON.stringify({ challenge_id: challenge_id })
+    })
+        .then(async response => {
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (e) {
+                // Some 429 responses may not be JSON; keep data as empty object.
+            }
+
+            if (!response.ok) {
+                let message = data.error || data.message;
+                if (!message && response.status === 429) {
+                    message = "Too many requests. Please wait a few seconds and try again.";
+                }
+                if (!message) {
+                    message = "Error restarting container.";
+                }
+                throw new Error(message);
+            }
+
+            return data;
+        })
+        .then(data => {
+            alert.innerHTML = ""; // Remove spinner
+            if (data.error || !data.connection || !data.expires_at) {
+                alert.innerHTML = data.error || "Invalid server response. Please try again.";
+                alert.classList.add("alert-danger");
+                toggleChallengeCreate();
+            } else {
+                // Show connection info
+                let expires = document.createElement('span');
+                expires.id = "deployment-expiry";
+                alert.append(expires, document.createElement('br'));
+                attachExpiryTicker(challenge_id, data.expires_at, expires);
+
+                // Display connection info based on type
+                renderConnectionInfo(data.connection, alert);
+                hideChallengeCreate();
+                toggleChallengeUpdate();
+            }
+        })
+        .catch(error => {
+            console.error("[Container] Restart error:", error);
+            alert.innerHTML = error && error.message ? error.message : "Error restarting container.";
+            alert.classList.add("alert-danger");
+            toggleChallengeCreate();
+        })
+        .finally(function () {
+            containerRequestInFlight = false;
+            enableButtons();
+        });
+}
+
 // Initialize: Inject UI elements if template doesn't load
 (function () {
     // console.log("[Container] Initializing - checking for template render");
@@ -427,6 +511,9 @@ function container_stop(challenge_id) {
                     <button onclick="container_renew(${challengeId})" class="btn btn-info d-none" id="extend-chal">
                         <small style="color: white"> Extend Time </small>
                     </button>
+                    <button onclick="container_restart(${challengeId})" class="btn btn-warning d-none" id="restart-chal">
+                        <small style="color: white"> Restart </small>
+                    </button>
                     <button onclick="container_stop(${challengeId})" class="btn btn-danger d-none" id="terminate-chal">
                         <small style="color: white"> Terminate </small>
                     </button>
@@ -474,6 +561,64 @@ function container_stop(challenge_id) {
     // console.log("[Container] MutationObserver started");
 })();
 
+function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+    }
+    // Fallback for non-secure contexts (plain http): temporary textarea + execCommand.
+    return new Promise(function (resolve, reject) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-9999px';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            const ok = document.execCommand('copy');
+            document.body.removeChild(textarea);
+            ok ? resolve() : reject(new Error('execCommand copy failed'));
+        } catch (e) {
+            document.body.removeChild(textarea);
+            reject(e);
+        }
+    });
+}
+
+function makeCopyable(element, textToCopy) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm btn-outline-secondary';
+    button.title = 'Copy';
+    button.setAttribute('aria-label', 'Copy to clipboard');
+    button.textContent = '\u{1F4CB}'; // 📋
+    button.style.marginLeft = '0.4em';
+    button.style.padding = '0 0.3em';
+    button.style.fontSize = '0.75em';
+    button.style.lineHeight = '1.4';
+    button.style.verticalAlign = 'middle';
+
+    button.addEventListener('click', function () {
+        const text = (textToCopy !== undefined && textToCopy !== null)
+            ? textToCopy
+            : element.textContent;
+        copyTextToClipboard(text)
+            .then(function () {
+                button.textContent = '✓'; // ✓
+                setTimeout(function () {
+                    button.textContent = '\u{1F4CB}';
+                }, 1500);
+            })
+            .catch(function (err) {
+                console.error('[Container] Copy failed:', err);
+            });
+    });
+
+    element.after(button);
+    return button;
+}
+
 function renderConnectionInfo(connection, parent) {
     if (!connection || typeof connection !== "object") {
         let info = document.createElement('small');
@@ -501,6 +646,7 @@ function renderConnectionInfo(connection, parent) {
             let code = document.createElement('code');
             code.textContent = 'nc ' + connection.host + " " + ports;
             parent.append(code);
+            makeCopyable(code);
         } else if (connection.type == "http" || connection.type == "web") {
             for (let internal in connection.ports) {
                 let external = connection.ports[internal];
@@ -515,7 +661,9 @@ function renderConnectionInfo(connection, parent) {
                 let external = connection.ports[internal];
                 let code = document.createElement('code');
                 code.textContent = 'ssh -p ' + external + ' <username>@' + connection.host;
-                parent.append(code, document.createElement('br'));
+                parent.append(code);
+                makeCopyable(code);
+                parent.append(document.createElement('br'));
             }
         } else {
             // Default/Custom
@@ -523,7 +671,9 @@ function renderConnectionInfo(connection, parent) {
                 let external = connection.ports[internal];
                 let code = document.createElement('code');
                 code.textContent = connection.host + ":" + external;
-                parent.append(code, document.createElement('br'));
+                parent.append(code);
+                makeCopyable(code);
+                parent.append(document.createElement('br'));
             }
         }
     } else {
@@ -532,10 +682,12 @@ function renderConnectionInfo(connection, parent) {
             let codeElement = document.createElement('code');
             codeElement.textContent = 'nc ' + connection.host + " " + connection.port;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         } else if (connection.type == "ssh") {
             let codeElement = document.createElement('code');
             codeElement.textContent = 'ssh -p ' + connection.port + ' <username>@' + connection.host;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         } else if (connection.type == "url") {
             let link = document.createElement('a');
             let url = connection.url || ('https://' + connection.host);
@@ -561,10 +713,12 @@ function renderConnectionInfo(connection, parent) {
             let codeElement = document.createElement('code');
             codeElement.textContent = connection.host;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         } else {
             let codeElement = document.createElement('code');
             codeElement.textContent = connection.host + ":" + connection.port;
             parent.append(codeElement);
+            makeCopyable(codeElement);
         }
     }
 

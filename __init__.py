@@ -6,7 +6,7 @@ Spawn Docker containers cho challenges với anti-cheat system
 import math
 import logging
 from flask import Flask
-from CTFd.plugins import register_plugin_assets_directory
+from CTFd.plugins import register_plugin_assets_directory, register_plugin_script
 from CTFd.plugins.challenges import CHALLENGE_CLASSES, BaseChallenge
 from CTFd.models import db, Solves
 from CTFd.utils.modes import get_model
@@ -28,7 +28,6 @@ from .services import (
     DockerService,
     FlagService,
     ContainerService,
-    AntiCheatService,
     AntiCheatService,
     PortManager,
     NotificationService
@@ -102,6 +101,38 @@ class ContainerChallengeType(BaseChallenge):
             mapped_data['drop_all_caps'] = str(mapped_data['drop_all_caps']).lower() in ['true', '1', 'yes']
         if 'no_new_privileges' in mapped_data:
             mapped_data['no_new_privileges'] = str(mapped_data['no_new_privileges']).lower() in ['true', '1', 'yes']
+
+        # Convert numeric fields (forms send strings; empty means "use default")
+        int_fields = ('container_initial', 'container_minimum', 'container_decay',
+                      'internal_port', 'timeout_minutes', 'max_renewals',
+                      'random_flag_length', 'pids_limit', 'value')
+        for key in int_fields:
+            if key in mapped_data:
+                if mapped_data[key] in ('', None):
+                    mapped_data.pop(key)
+                else:
+                    mapped_data[key] = int(mapped_data[key])
+        if 'cpu_limit' in mapped_data:
+            if mapped_data['cpu_limit'] in ('', None):
+                mapped_data.pop('cpu_limit')
+            else:
+                mapped_data['cpu_limit'] = float(mapped_data['cpu_limit'])
+
+        # Multi-container mode: validate compose and derive fallback fields
+        compose_yaml = str(mapped_data.get('compose_yaml') or '').strip()
+        if compose_yaml:
+            from .services.compose_parser import parse_compose, get_entry_service
+            services = parse_compose(compose_yaml)  # raises with a readable message
+            entry = get_entry_service(services)
+            # image/internal_port are informational in compose mode - fill
+            # them from the entry service so NOT NULL constraints hold
+            if not mapped_data.get('image'):
+                mapped_data['image'] = entry['image']
+            if not mapped_data.get('internal_port'):
+                mapped_data['internal_port'] = entry['ports'][0]
+            mapped_data['compose_yaml'] = compose_yaml
+        else:
+            mapped_data.pop('compose_yaml', None)
         # ==========================================
         
         # Create challenge with mapped data
@@ -159,11 +190,21 @@ class ContainerChallengeType(BaseChallenge):
             # Container specific
             "image": challenge.image,
             "internal_port": challenge.internal_port,
+            "internal_ports": challenge.internal_ports,
+            "compose_yaml": challenge.compose_yaml,
             "connection_type": challenge.container_connection_type,
             "connection_info": challenge.container_connection_info,
             "timeout_minutes": challenge.timeout_minutes,
             "max_renewals": challenge.max_renewals,
             "flag_mode": challenge.flag_mode,
+            # Security capabilities (needed so the update form reflects saved values)
+            "capabilities": challenge.capabilities,
+            "drop_all_caps": challenge.drop_all_caps,
+            "no_new_privileges": challenge.no_new_privileges,
+            "pids_limit": challenge.pids_limit,
+            # Per-challenge resource overrides (empty = global config)
+            "memory_limit": challenge.memory_limit,
+            "cpu_limit": challenge.cpu_limit,
             # Dynamic scoring
             "initial": challenge.container_initial,
             "minimum": challenge.container_minimum,
@@ -184,7 +225,12 @@ class ContainerChallengeType(BaseChallenge):
             Updated challenge
         """
         data = request.form or request.get_json()
-        
+
+        # Multi-container mode: validate the compose definition up front
+        if str(data.get('compose_yaml') or '').strip():
+            from .services.compose_parser import parse_compose
+            parse_compose(str(data['compose_yaml']))  # raises with a readable message
+
         # Field mapping from UI to DB attributes
         # Note: Some fields have `name=` in column definition for backward compatibility
         field_mapping = {
@@ -203,9 +249,19 @@ class ContainerChallengeType(BaseChallenge):
             if attr in exclude_fields:
                 continue
             
-            # Skip if empty
+            # Skip if empty, except fields where empty is a valid value
+            # (e.g. clearing all extra capabilities must be possible)
+            clearable = ('capabilities', 'internal_ports', 'command', 'container_connection_info')
+            # Empty means "unset" for these (resource overrides fall back to
+            # global config; clearing compose returns to single-image mode)
+            nullable = ('memory_limit', 'cpu_limit', 'compose_yaml')
+            db_attr_early = field_mapping.get(attr, attr)
             if value == '':
-                continue
+                if db_attr_early in nullable:
+                    setattr(challenge, db_attr_early, None)
+                    continue
+                if db_attr_early not in clearable:
+                    continue
             
             # Map field name to actual attribute
             db_attr = field_mapping.get(attr, attr)
@@ -404,7 +460,6 @@ flag_service = None
 container_service = None
 anticheat_service = None
 port_manager = None
-port_manager = None
 redis_expiration_service = None
 notification_service = None
 
@@ -422,7 +477,10 @@ def load(app: Flask):
     
     # Create database tables
     app.db.create_all()
-    
+
+    # Add columns that create_all() cannot add to pre-existing tables
+    _ensure_schema()
+
     # Initialize default config
     _initialize_default_config()
     
@@ -432,7 +490,10 @@ def load(app: Flask):
         docker_socket = ContainerConfig.get('docker_socket', 'unix://var/run/docker.sock')
         
         # docker-py handles SSH URLs directly
-        docker_service = DockerService(base_url=docker_socket)
+        docker_service = DockerService(
+            base_url=docker_socket,
+            deployment_id=ContainerConfig.get('deployment_id')
+        )
         
         # Test connection but don't fail plugin load if unavailable
         if docker_service.is_connected():
@@ -445,7 +506,10 @@ def load(app: Flask):
         logger.warning("Plugin loaded successfully. Configure Docker in Admin → Containers → Settings")
         # Create a dummy docker service that will fail gracefully
         try:
-            docker_service = DockerService(base_url=docker_socket if 'docker_socket' in locals() else 'unix://var/run/docker.sock')
+            docker_service = DockerService(
+                base_url=docker_socket if 'docker_socket' in locals() else 'unix://var/run/docker.sock',
+                deployment_id=ContainerConfig.get('deployment_id')
+            )
         except:
             docker_service = None
     
@@ -491,6 +555,9 @@ def load(app: Flask):
     register_plugin_assets_directory(
         app, base_path="/plugins/containers/assets/"
     )
+
+    # Global script: colors challenge-board tiles that have a running instance
+    register_plugin_script('/plugins/containers/assets/board.js')
     
     # Register template folder
     from jinja2 import FileSystemLoader, ChoiceLoader
@@ -512,7 +579,7 @@ def load(app: Flask):
     
     # Inject services into routes
     set_user_services(container_service, flag_service, anticheat_service)
-    set_admin_services(docker_service, container_service, anticheat_service)
+    set_admin_services(docker_service, container_service, anticheat_service, flag_service)
     
     # Register blueprints
     app.register_blueprint(user_bp)
@@ -523,6 +590,34 @@ def load(app: Flask):
     _setup_background_jobs(app)
     
     logger.info("Container Challenge Plugin loaded successfully")
+
+
+def _ensure_schema():
+    """
+    Lightweight auto-migration: create_all() does not ALTER existing tables,
+    so plugin upgrades on a live database need explicit ADD COLUMN calls.
+    """
+    from sqlalchemy import inspect, text
+
+    # Resolve table names from the models (ContainerChallenge maps to its own
+    # joined-inheritance table, not to 'challenges')
+    needed = {
+        ContainerChallenge.__table__.name: {'compose_yaml': 'TEXT'},
+        ContainerInstance.__table__.name: {'container_ids': 'JSON'},
+    }
+
+    try:
+        inspector = inspect(db.engine)
+        for table, columns in needed.items():
+            existing = {c['name'] for c in inspector.get_columns(table)}
+            for column, col_type in columns.items():
+                if column not in existing:
+                    db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                    db.session.commit()
+                    logger.info(f"Schema migration: added {table}.{column}")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Schema auto-migration failed: {e}")
 
 
 def _initialize_default_config():
@@ -542,6 +637,14 @@ def _initialize_default_config():
         if ContainerConfig.get(key) is None:
             ContainerConfig.set(key, value)
             logger.info(f"Set default config: {key}={value}")
+
+    # Unique ID of this deployment, generated once. Stamped on every container
+    # so multiple CTFd instances can share one Docker host safely.
+    if ContainerConfig.get('deployment_id') is None:
+        import uuid
+        deployment_id = uuid.uuid4().hex[:12]
+        ContainerConfig.set('deployment_id', deployment_id)
+        logger.info(f"Generated deployment ID: {deployment_id}")
 
 
 def _setup_background_jobs(app):
@@ -564,6 +667,28 @@ def _setup_background_jobs(app):
                 id='cleanup_expired'
             )
             logger.info("Scheduled: cleanup_expired_instances (every 1 minute)")
+
+        # Recover stuck instances + sync DB with Docker every 1 minute
+        if container_service:
+            scheduler.add_job(
+                func=lambda: _run_with_app_context(app, container_service.recover_stale_instances),
+                trigger="interval",
+                minutes=1,
+                id='recover_stale'
+            )
+            scheduler.add_job(
+                func=lambda: _run_with_app_context(app, container_service.reconcile_with_docker),
+                trigger="interval",
+                minutes=1,
+                id='reconcile_docker'
+            )
+            scheduler.add_job(
+                func=lambda: _run_with_app_context(app, container_service.check_infrastructure),
+                trigger="interval",
+                minutes=1,
+                id='infra_check'
+            )
+            logger.info("Scheduled: recover_stale_instances + reconcile_with_docker + check_infrastructure (every 1 minute)")
         
         # Cleanup old instances every 1 hour
         if container_service:

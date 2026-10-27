@@ -169,6 +169,17 @@
 			</div>
 
 			<div class="form-group">
+				<label for="max_concurrent_provisions">Max Simultaneous Provisions (global)</label>
+				<input class="form-control" type="number" name="max_concurrent_provisions"
+					id="max_concurrent_provisions" placeholder="4" min="1"
+					value="{{ settings.max_concurrent_provisions }}">
+				<small class="form-text text-muted">
+					How many containers the platform starts at the same time. Extra requests get a
+					"try again in a few seconds" message - protects the Docker host from start-of-CTF stampedes.
+				</small>
+			</div>
+
+			<div class="form-group">
 				<label for="container_discord_webhook_url">Discord Webhook URL</label>
 				<input class="form-control" type="text" name="container_discord_webhook_url"
 					id="container_discord_webhook_url" placeholder="https://discord.com/api/webhooks/..."
@@ -309,6 +320,34 @@
 	</div>
 </form>
 
+<div class="card mt-3">
+	<div class="card-header">
+		<h5><i class="fab fa-docker"></i> Pull Docker Image</h5>
+	</div>
+	<div class="card-body">
+		<div class="alert alert-info">
+			<i class="fas fa-info-circle"></i> Challenge images must be present on the Docker host before
+			instances can start. Pulls run in the background on the server and do not block the platform.
+		</div>
+		<div class="form-row align-items-end">
+			<div class="form-group col-md-9 mb-md-0">
+				<label for="pull_image_name">Image Name</label>
+				<input class="form-control" type="text" id="pull_image_name" placeholder="nginx:latest">
+				<small class="form-text text-muted">
+					e.g. <code>nginx:latest</code>, <code>ubuntu:20.04</code>. Without a tag,
+					<code>latest</code> is pulled.
+				</small>
+			</div>
+			<div class="form-group col-md-3 mb-md-0">
+				<button type="button" class="btn btn-primary btn-block" id="pull_image_btn">
+					<i class="fas fa-download"></i> Pull
+				</button>
+			</div>
+		</div>
+		<div id="pull_image_status" class="alert mt-3 mb-0" style="display: none;"></div>
+	</div>
+</div>
+
 {% include "config/container_status.html" %}
 
 {% endblock %}
@@ -417,5 +456,103 @@
 				btn.disabled = false;
 			});
 	}
+
+	// Pull Docker image (runs in background on the server, polled from here)
+	let pullPollTimer = null;
+
+	function escapeHtml(str) {
+		const div = document.createElement('div');
+		div.appendChild(document.createTextNode(str));
+		return div.innerHTML;
+	}
+
+	function setPullStatus(alertClass, html) {
+		const box = document.getElementById('pull_image_status');
+		box.className = 'alert mt-3 mb-0 ' + alertClass;
+		box.innerHTML = html;
+		box.style.display = 'block';
+	}
+
+	function finishPull(alertClass, html) {
+		if (pullPollTimer) {
+			clearInterval(pullPollTimer);
+			pullPollTimer = null;
+		}
+		setPullStatus(alertClass, html);
+		document.getElementById('pull_image_btn').disabled = false;
+	}
+
+	function pollPullStatus(image) {
+		const startedAt = Date.now();
+		const maxWaitMs = 5 * 60 * 1000; // 5 minutes
+
+		pullPollTimer = setInterval(function () {
+			if (Date.now() - startedAt > maxWaitMs) {
+				finishPull('alert-warning',
+					'<i class="fas fa-clock"></i> Still pulling <code>' + escapeHtml(image) +
+					'</code> after 5 minutes. The pull continues on the server - check the image list later.');
+				return;
+			}
+
+			fetch('{{ url_for("containers_admin.api_images_pull_status") }}?image=' + encodeURIComponent(image))
+				.then(r => r.json())
+				.then(data => {
+					if (data.status === 'done') {
+						finishPull('alert-success',
+							'<i class="fas fa-check-circle"></i> Image <code>' + escapeHtml(image) +
+							'</code> pulled successfully.');
+					} else if (data.status === 'error') {
+						finishPull('alert-danger',
+							'<i class="fas fa-times-circle"></i> Pull failed: ' +
+							escapeHtml(data.detail || 'Unknown error'));
+					}
+					// 'pulling' (or transient 'unknown'): keep polling
+				})
+				.catch(function () {
+					// Transient network error - keep polling until the cap
+				});
+		}, 2000);
+	}
+
+	function pullImage() {
+		const image = document.getElementById('pull_image_name').value.trim();
+		if (!image) {
+			alert('Please enter an image name first');
+			return;
+		}
+
+		const btn = document.getElementById('pull_image_btn');
+		btn.disabled = true;
+		setPullStatus('alert-info',
+			'<i class="fas fa-spinner fa-spin"></i> Pulling <code>' + escapeHtml(image) + '</code>...');
+
+		fetch('{{ url_for("containers_admin.api_images_pull") }}', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'CSRF-Token': '{{ Session.nonce }}'
+			},
+			body: JSON.stringify({ image: image })
+		})
+			.then(r => r.json())
+			.then(data => {
+				if (data.error) {
+					finishPull('alert-danger', '<i class="fas fa-times-circle"></i> ' + escapeHtml(data.error));
+					return;
+				}
+				pollPullStatus(image);
+			})
+			.catch(e => finishPull('alert-danger', 'Network error: ' + escapeHtml(String(e))));
+	}
+
+	document.getElementById('pull_image_btn').addEventListener('click', pullImage);
+	document.getElementById('pull_image_name').addEventListener('keydown', function (e) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			if (!document.getElementById('pull_image_btn').disabled) {
+				pullImage();
+			}
+		}
+	});
 </script>
 {% endblock %}

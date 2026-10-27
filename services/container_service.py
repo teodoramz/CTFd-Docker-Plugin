@@ -16,6 +16,13 @@ from .port_manager import PortManager
 logger = logging.getLogger(__name__)
 
 
+class NonRetryableProvisionError(Exception):
+    """
+    Provisioning failure that will not succeed on retry
+    (e.g. the container exits immediately after start).
+    """
+
+
 class ContainerService:
     """
     Service to manage container lifecycle
@@ -27,6 +34,29 @@ class ContainerService:
         self.port_manager = port_manager
         self.notification_service = notification_service
         self._cleanup_running = False  # Prevent overlapping cleanup jobs
+        # Global provisioning throttle: bounds how many containers this worker
+        # provisions at once, so a stampede of "Fetch Instance" clicks at CTF
+        # start cannot overwhelm the Docker host.
+        import threading
+        self._provision_lock = threading.Lock()
+        self._provisions_in_flight = 0
+
+    def _acquire_provision_slot(self) -> bool:
+        from ..models.config import ContainerConfig
+        try:
+            limit = int(ContainerConfig.get('max_concurrent_provisions', 4))
+        except (TypeError, ValueError):
+            limit = 4
+        with self._provision_lock:
+            if self._provisions_in_flight >= limit:
+                return False
+            self._provisions_in_flight += 1
+            return True
+
+    def _release_provision_slot(self):
+        with self._provision_lock:
+            if self._provisions_in_flight > 0:
+                self._provisions_in_flight -= 1
     
     def create_instance(self, challenge_id: int, account_id: int, user_id: int) -> ContainerInstance:
         """
@@ -57,6 +87,20 @@ class ContainerService:
         
         if already_solved:
             raise Exception("Challenge already solved - cannot create new instance")
+
+        # Global provisioning throttle (checked before creating any DB records)
+        if not self._acquire_provision_slot():
+            raise Exception(
+                "The platform is starting many containers right now - "
+                "please try again in a few seconds"
+            )
+        try:
+            return self._create_instance_inner(challenge_id, account_id, user_id, challenge)
+        finally:
+            self._release_provision_slot()
+
+    def _create_instance_inner(self, challenge_id: int, account_id: int, user_id: int, challenge) -> ContainerInstance:
+        """Body of create_instance, executed while holding a provision slot"""
         
         # 3. Check if already has running instance
         existing = ContainerInstance.query.filter_by(
@@ -139,9 +183,14 @@ class ContainerService:
         db.session.commit()
         
         try:
+            # Multi-container (compose) challenges take a dedicated path
+            if challenge.is_compose():
+                self._provision_compose(instance, challenge, flag)
+                return
+
             # Get config
             from ..models.config import ContainerConfig
-            
+
             # Check if subdomain routing is enabled
             subdomain_enabled = ContainerConfig.get('subdomain_enabled', 'false').lower() == 'true'
             subdomain_base_domain = ContainerConfig.get('subdomain_base_domain', '')
@@ -219,7 +268,9 @@ class ContainerService:
                     import re
                     # Sanitize challenge name (only alphanumeric and hyphens)
                     safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
-                    container_name = f"{safe_name}_{instance.account_id}"
+                    # Include the instance UUID so retries / leftover containers
+                    # never collide on the container name (409 name conflict)
+                    container_name = f"{safe_name}_{instance.account_id}_{instance.uuid[:8]}"
                     
                     # Replace {FLAG} placeholder in command if present
                     command = challenge.command if challenge.command else None
@@ -301,6 +352,15 @@ class ContainerService:
                         security_opt=security_options if security_options else None
                     )
                     
+                    # Verify the container actually stays up before exposing
+                    # connection info to the user. A container that dies right
+                    # away (bad command/entrypoint) fails here with its logs.
+                    ok, detail = self.docker.verify_container_startup(result['container_id'])
+                    if not ok:
+                        raise NonRetryableProvisionError(
+                            f"Container failed to start: {detail}"
+                        )
+
                     # 5. Update instance
                     instance.container_id = result['container_id']
                     instance.connection_port = host_port
@@ -395,6 +455,10 @@ class ContainerService:
                     # Success: break loop
                     break
                     
+                except NonRetryableProvisionError:
+                    # Retrying cannot help (the container itself is broken) -
+                    # propagate straight to the outer handler.
+                    raise
                 except Exception as e:
                     logger.warning(f"Attempt {attempt+1}/{max_retries} failed: {e}")
                     # If this was the last attempt, re-raise the exception
@@ -422,6 +486,140 @@ class ContainerService:
             db.session.commit()
             raise
     
+    def _provision_compose(self, instance: ContainerInstance, challenge: ContainerChallenge, flag: str):
+        """
+        Provision a multi-container (compose) instance:
+        - dedicated bridge network per instance (services reach each other by name)
+        - services started in dependency order
+        - published ports allocated from the port manager
+        - FLAG env + {FLAG} substitution in every service
+        """
+        import re
+        from ..models.config import ContainerConfig
+        from .compose_parser import parse_compose, get_entry_service
+
+        services = parse_compose(challenge.compose_yaml)
+        entry = get_entry_service(services)
+
+        network_name = f"ctfd-inst-{instance.uuid[:8]}"
+        if not self.docker.create_network(
+            name=network_name,
+            driver='bridge',
+            labels={'ctfd.instance_uuid': instance.uuid}
+        ):
+            raise Exception(f"Failed to create instance network {network_name}")
+
+        # Allocate host ports for every published container port.
+        # connection_ports keys are 'service:port' (two services may both use 80).
+        publish = [(svc['name'], port) for svc in services for port in svc['ports']]
+        allocated = self.port_manager.allocate_ports(len(publish))
+        ports_map = {}
+        per_service_ports = {}
+        for (svc_name, port), host_port in zip(publish, allocated):
+            ports_map[f"{svc_name}:{port}"] = host_port
+            per_service_ports.setdefault(svc_name, {})[str(port)] = host_port
+
+        safe_name = re.sub(r'[^a-zA-Z0-9-]', '', challenge.name.replace(' ', '-').lower())
+
+        security_options = []
+        if getattr(challenge, 'no_new_privileges', True):
+            security_options.append('no-new-privileges:true')
+
+        container_ids = []
+        entry_container_id = None
+        try:
+            for svc in services:
+                env = {k: v.replace('{FLAG}', flag) for k, v in svc['environment'].items()}
+                env['FLAG'] = flag
+
+                command = svc['command']
+                if isinstance(command, str) and '{FLAG}' in command:
+                    command = command.replace('{FLAG}', flag)
+
+                labels = {
+                    'ctfd.instance_uuid': instance.uuid,
+                    'ctfd.challenge_id': str(challenge.id),
+                    'ctfd.account_id': str(instance.account_id),
+                    'ctfd.expires_at': str(instance.expires_at.timestamp()),
+                    'ctfd.service': svc['name'],
+                }
+
+                result = self.docker.create_container(
+                    image=svc['image'],
+                    ports=per_service_ports.get(svc['name']),
+                    command=command,
+                    environment=env,
+                    memory_limit=challenge.get_memory_limit(),
+                    cpu_limit=challenge.get_cpu_limit(),
+                    pids_limit=challenge.pids_limit,
+                    name=f"{safe_name}_{instance.account_id}_{instance.uuid[:8]}_{svc['name']}",
+                    labels=labels,
+                    network=network_name,
+                    network_aliases=[svc['name']],
+                    cap_add=svc['cap_add'] or None,
+                    cap_drop=['ALL'] if getattr(challenge, 'drop_all_caps', True) else None,
+                    security_opt=security_options if security_options else None
+                )
+                container_ids.append(result['container_id'])
+                if svc['name'] == entry['name']:
+                    entry_container_id = result['container_id']
+
+            ok, detail = self.docker.verify_containers_startup(container_ids)
+            if not ok:
+                raise NonRetryableProvisionError(f"Compose service failed to start: {detail}")
+
+        except Exception:
+            # Roll back the partial deployment: containers + network
+            for cid in container_ids:
+                try:
+                    self.docker.stop_container(cid)
+                except Exception:
+                    pass
+            self.docker.remove_network(network_name)
+            raise
+
+        # Success: update instance
+        instance.container_id = entry_container_id
+        instance.container_ids = container_ids
+        instance.connection_host = ContainerConfig.get('connection_host', 'localhost')
+        instance.connection_port = ports_map[f"{entry['name']}:{entry['ports'][0]}"]
+        instance.connection_ports = ports_map
+        instance.connection_info = {
+            'type': challenge.container_connection_type,
+            'info': challenge.container_connection_info
+        }
+        instance.status = 'running'
+        instance.started_at = datetime.utcnow()
+        db.session.commit()
+
+        # Schedule expiration in Redis (for accurate killing)
+        try:
+            from .. import redis_expiration_service
+            if redis_expiration_service:
+                expires_in_seconds = int((instance.expires_at - datetime.utcnow()).total_seconds())
+                redis_expiration_service.schedule_expiration(instance.uuid, expires_in_seconds)
+        except Exception as e:
+            logger.warning(f"Failed to schedule Redis expiration: {e}")
+
+        logger.info(
+            f"Provisioned compose instance {instance.uuid} "
+            f"({len(container_ids)} services on {network_name})"
+        )
+
+        self._create_audit_log(
+            'instance_started',
+            instance_id=instance.id,
+            challenge_id=challenge.id,
+            account_id=instance.account_id,
+            details={
+                'compose': True,
+                'services': [s['name'] for s in services],
+                'ports': ports_map,
+                'network': network_name
+            }
+        )
+        db.session.commit()
+
     def renew_instance(self, instance: ContainerInstance, user_id: int) -> ContainerInstance:
         """
         Renew (extend) container expiration
@@ -509,10 +707,30 @@ class ContainerService:
             logger.warning(f"Failed to cancel Redis expiration: {e}")
         
         try:
-            # Stop Docker container
-            if instance.container_id:
-                self.docker.stop_container(instance.container_id)
-            
+            # Stop Docker container(s). stop_container() returns True when the
+            # container was stopped OR is already gone; False means it is
+            # likely still running - do NOT mark the instance stopped then,
+            # otherwise the container is orphaned and keeps running.
+            if instance.container_ids:
+                # Compose instance: stop every service, then remove its network
+                failed = [
+                    cid for cid in instance.container_ids
+                    if not self.docker.stop_container(cid)
+                ]
+                if failed:
+                    raise Exception(
+                        "Docker failed to stop containers: "
+                        + ', '.join(c[:12] for c in failed)
+                    )
+                # auto_remove may still be detaching containers; if removal
+                # fails now, the reconcile job cleans the network up later
+                self.docker.remove_network(f"ctfd-inst-{instance.uuid[:8]}")
+            elif instance.container_id:
+                if not self.docker.stop_container(instance.container_id):
+                    raise Exception(
+                        f"Docker failed to stop container {instance.container_id[:12]}"
+                    )
+
             # Release port back to pool
             if instance.connection_port:
                 self.port_manager.release_port(instance.connection_port)
@@ -612,10 +830,133 @@ class ContainerService:
                     failed += 1
             
             logger.info(f"Cleanup completed: {cleaned} cleaned, {failed} failed")
-        
+
         finally:
             self._cleanup_running = False
-    
+
+    def recover_stale_instances(self):
+        """
+        Background job: recover instances stuck in transient states
+        ('pending', 'stopping'), e.g. after a crash/restart mid-operation.
+        These otherwise stay stuck forever and keep their ports reserved.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=5)
+        stale = ContainerInstance.query.filter(
+            ContainerInstance.status.in_(['pending', 'stopping']),
+            ContainerInstance.created_at < cutoff
+        ).limit(50).all()
+
+        for instance in stale:
+            try:
+                if instance.status == 'stopping':
+                    logger.warning(f"Retrying stop for instance {instance.uuid} stuck in 'stopping'")
+                    self.stop_instance(instance, user_id=None, reason='stale')
+                elif instance.is_expired():
+                    logger.warning(f"Marking instance {instance.uuid} stuck in 'pending' as error")
+                    instance.status = 'error'
+                    instance.extra_data = {'error': 'stuck in pending state'}
+                    db.session.commit()
+            except Exception as e:
+                logger.error(f"Failed to recover stale instance {instance.uuid}: {e}")
+                db.session.rollback()
+
+        # Instances stuck in 'provisioning' (e.g. CTFd crashed mid-provision)
+        # hold a user slot for the rest of their lifetime - fail them after
+        # 10 minutes (real provisioning takes seconds).
+        stuck_provisioning = ContainerInstance.query.filter(
+            ContainerInstance.status == 'provisioning',
+            ContainerInstance.created_at < datetime.utcnow() - timedelta(minutes=10)
+        ).limit(50).all()
+
+        for instance in stuck_provisioning:
+            try:
+                logger.warning(f"Failing instance {instance.uuid} stuck in 'provisioning'")
+                self.stop_instance(instance, user_id=None, reason='stale')
+            except Exception as e:
+                logger.error(f"Failed to recover stuck provisioning {instance.uuid}: {e}")
+                db.session.rollback()
+
+    def reconcile_with_docker(self):
+        """
+        Background job: sync database state with Docker reality.
+
+        - Instances marked 'running' whose container died/vanished are marked
+          stopped, so users see "no active instance" instead of a dead
+          connection and can immediately request a new one.
+        - Docker containers whose instance is no longer active are removed
+          (orphans left behind by failed stops or manual DB edits).
+        """
+        if not self.docker or not self.docker.is_connected():
+            return
+
+        try:
+            containers = self.docker.list_managed_containers()
+        except Exception as e:
+            logger.error(f"Reconcile: failed to list containers: {e}")
+            return
+
+        live_counts = {}
+        for container in containers:
+            container_uuid = container.labels.get('ctfd.instance_uuid')
+            if container_uuid:
+                live_counts[container_uuid] = live_counts.get(container_uuid, 0) + 1
+
+        # 1. Running instances with missing containers -> mark stopped.
+        # For compose instances a single dead service breaks the challenge,
+        # so anything less than the full set counts as died.
+        running = ContainerInstance.query.filter(
+            ContainerInstance.status == 'running'
+        ).all()
+
+        # Grace period so we never kill an instance whose container was
+        # created after our container listing above (startup race).
+        grace = datetime.utcnow() - timedelta(seconds=60)
+
+        active_uuids = set()
+        for instance in running:
+            active_uuids.add(instance.uuid)
+            expected = len(instance.container_ids) if instance.container_ids else 1
+            if (live_counts.get(instance.uuid, 0) < expected
+                    and instance.started_at
+                    and instance.started_at < grace):
+                logger.warning(f"Container(s) for instance {instance.uuid} died unexpectedly - marking stopped")
+                try:
+                    self.stop_instance(instance, user_id=None, reason='died')
+                except Exception as e:
+                    logger.error(f"Failed to mark dead instance {instance.uuid}: {e}")
+
+        # Provisioning/stopping instances are also "active" - don't touch their containers
+        transitional = ContainerInstance.query.filter(
+            ContainerInstance.status.in_(['pending', 'provisioning', 'stopping'])
+        ).all()
+        for instance in transitional:
+            active_uuids.add(instance.uuid)
+
+        # 2. Containers with no active instance -> orphans, remove them
+        for container in containers:
+            container_uuid = container.labels.get('ctfd.instance_uuid')
+            if container_uuid and container_uuid not in active_uuids:
+                logger.warning(f"Removing orphaned container {container.id[:12]} (instance {container_uuid})")
+                try:
+                    container.stop(timeout=3)
+                except Exception:
+                    pass
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    pass
+
+        # 3. Per-instance (compose) networks with no active instance -> remove
+        for network in self.docker.list_managed_networks():
+            network_uuid = network.attrs.get('Labels', {}).get('ctfd.instance_uuid')
+            if network_uuid and network_uuid not in active_uuids:
+                try:
+                    network.remove()
+                    logger.info(f"Removed orphaned network {network.name}")
+                except Exception:
+                    # Still has containers attached (being removed) - next run
+                    pass
+
     def cleanup_old_instances(self):
         """
         Background job: Delete old stopped/error instances
@@ -641,6 +982,41 @@ class ContainerService:
                     logger.error(f"Error deleting instance: {e}")
                     db.session.rollback()
     
+    def check_infrastructure(self):
+        """
+        Background job: alert admins (Discord webhook) on critical
+        infrastructure problems. Deduplicated via notify_infra cooldowns.
+        """
+        if not self.notification_service:
+            return
+
+        # 1. Docker daemon unreachable
+        if not self.docker or not self.docker.is_connected():
+            self.notification_service.notify_infra(
+                'docker_down',
+                '🔴 Docker Unreachable',
+                'The Docker daemon is not responding - no new challenge instances can start.',
+                fields=[{'name': 'Socket', 'value': str(getattr(self.docker, 'base_url', 'unknown')), 'inline': True}]
+            )
+            return
+
+        # 2. Port pool nearly exhausted
+        try:
+            free = self.port_manager.get_available_count()
+            start, end = self.port_manager._get_port_range()
+            total = end - start + 1
+            if free <= max(5, int(total * 0.05)):
+                self.notification_service.notify_infra(
+                    'ports_low',
+                    '🟠 Port Pool Nearly Exhausted',
+                    f'Only {free} of {total} challenge ports are free. '
+                    'New instances will fail once the pool is empty - consider widening the port range.',
+                    fields=[{'name': 'Free', 'value': str(free), 'inline': True},
+                            {'name': 'Range', 'value': f'{start}-{end}', 'inline': True}]
+                )
+        except Exception as e:
+            logger.warning(f"Infra check (ports) failed: {e}")
+
     def _create_audit_log(self, event_type, **kwargs):
         """Create audit log entry"""
         log = ContainerAuditLog(

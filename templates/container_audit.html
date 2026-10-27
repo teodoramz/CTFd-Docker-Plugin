@@ -1,0 +1,278 @@
+{% extends "container_base.html" %}
+
+{% block menu %}
+{% include "config/container_menu.html" %}
+{% endblock %}
+
+{% block panel %}
+
+<style>
+	.filter-card {
+		background: #fff;
+		border: 1px solid #dfdfdf;
+		border-radius: 4px;
+		padding: 15px;
+	}
+
+	.details-cell {
+		max-width: 340px;
+	}
+
+	.details-cell summary {
+		cursor: pointer;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 320px;
+	}
+
+	.details-cell summary:focus {
+		outline: none;
+	}
+
+	.details-cell .badge {
+		font-weight: normal;
+		font-family: monospace;
+	}
+
+	.details-cell pre {
+		max-width: 320px;
+		max-height: 220px;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-all;
+		font-size: 0.75rem;
+	}
+</style>
+
+<div class="filter-card mb-4">
+	<form method="GET" class="form-row align-items-end">
+		<div class="col-lg-3 col-md-4 mb-3 mb-md-0">
+			<label class="small text-muted font-weight-bold">EVENT TYPE</label>
+			<select name="event_type" class="form-control custom-select">
+				<option value="">All Events</option>
+				{% for et in event_types %}
+				<option value="{{ et }}" {{ 'selected' if filters.event_type == et }}>{{ et }}</option>
+				{% endfor %}
+			</select>
+		</div>
+
+		<div class="col-lg-2 col-md-4 mb-3 mb-md-0">
+			<label class="small text-muted font-weight-bold">SEVERITY</label>
+			<select name="severity" class="form-control custom-select">
+				<option value="">All Severities</option>
+				{% for sev in severities %}
+				<option value="{{ sev }}" {{ 'selected' if filters.severity == sev }}>{{ sev | capitalize }}</option>
+				{% endfor %}
+			</select>
+		</div>
+
+		<div class="col-lg-3 col-md-4 mb-3 mb-md-0">
+			<label class="small text-muted font-weight-bold">CHALLENGE</label>
+			<select name="challenge_id" class="form-control custom-select">
+				<option value="">All Challenges</option>
+				{% for c in all_challenges %}
+				<option value="{{ c.id }}" {{ 'selected' if filters.challenge_id == c.id }}>{{ c.name }}</option>
+				{% endfor %}
+			</select>
+		</div>
+
+		<div class="col-lg-2 col-md-4 mb-3 mb-md-0">
+			<label class="small text-muted font-weight-bold">ACCOUNT ID</label>
+			<input type="number" name="account_id" class="form-control" placeholder="e.g. 1" min="1"
+				value="{{ filters.account_id if filters.account_id else '' }}">
+		</div>
+
+		<div class="col-auto mb-3 mb-md-0">
+			<button type="submit" class="btn btn-primary px-4">
+				<i class="fas fa-filter mr-1"></i> Apply
+			</button>
+			<a href="{{ url_for('containers_admin.audit_log') }}" class="btn btn-link text-muted ml-2">
+				Reset
+			</a>
+		</div>
+	</form>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+	<div>
+		<h4 class="mb-1">Audit Log</h4>
+		<p class="text-muted mb-0 small">Showing {{ logs.total }} results</p>
+	</div>
+	<div class="btn-group">
+		<button type="button" class="btn btn-outline-secondary btn-sm" onclick="location.reload()">
+			<i class="fas fa-sync-alt"></i> Refresh
+		</button>
+		<a href="{{ url_for('containers_admin.audit_log_export', **filters) }}"
+			class="btn btn-outline-secondary btn-sm">
+			<i class="fas fa-download"></i> Export CSV
+		</a>
+	</div>
+</div>
+
+<div class="card">
+	<table class="table table-striped mb-0">
+		<thead>
+			<tr>
+				<th class="pl-4">Timestamp (UTC)</th>
+				<th>Event</th>
+				<th class="text-center">Severity</th>
+				<th>Challenge</th>
+				<th>Account</th>
+				<th>User</th>
+				<th>IP</th>
+				<th class="pr-4">Details</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% if logs and logs.items|length > 0 %}
+			{% for log in logs.items %}
+			<tr>
+				<td class="pl-4 text-muted small text-nowrap">
+					{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') if log.timestamp else '-' }}
+				</td>
+				<td>
+					{% set badge_color = 'danger' if log.severity in ('critical', 'error') else 'warning' if
+					log.severity == 'warning' else 'secondary' %}
+					<span class="badge badge-{{ badge_color }}">{{ log.event_type }}</span>
+				</td>
+				<td class="text-center">
+					<span class="small text-muted">{{ (log.severity or 'info') | capitalize }}</span>
+				</td>
+				<td>
+					{% if log.challenge_id %}
+					{% if challenge_names.get(log.challenge_id) %}
+					<a href="{{ url_for('admin.challenges_detail', challenge_id=log.challenge_id) }}">
+						{{ challenge_names.get(log.challenge_id) }}
+					</a>
+					{% else %}
+					<span class="text-muted small">Challenge #{{ log.challenge_id }}</span>
+					{% endif %}
+					{% else %}
+					<span class="text-muted small">-</span>
+					{% endif %}
+				</td>
+				<td>
+					{% if log.account_id %}
+					{% if is_teams_mode %}
+					{% set team = log.account_id | get_team %}
+					{% if team %}
+					<a href="{{ url_for('admin.teams_detail', team_id=team.id) }}">
+						{{ team.name }}
+					</a>
+					{% else %}
+					<span class="text-muted small">Team #{{ log.account_id }}</span>
+					{% endif %}
+					{% else %}
+					{% set account_user = log.account_id | get_user %}
+					{% if account_user %}
+					<a href="{{ url_for('admin.users_detail', user_id=account_user.id) }}">
+						{{ account_user.name }}
+					</a>
+					{% else %}
+					<span class="text-muted small">User #{{ log.account_id }}</span>
+					{% endif %}
+					{% endif %}
+					{% else %}
+					<span class="text-muted small">-</span>
+					{% endif %}
+				</td>
+				<td>
+					{% if log.user_id %}
+					{% set user = log.user_id | get_user %}
+					{% if user %}
+					<a href="{{ url_for('admin.users_detail', user_id=user.id) }}">
+						{{ user.name }}
+					</a>
+					{% else %}
+					<span class="text-muted small">User #{{ log.user_id }}</span>
+					{% endif %}
+					{% else %}
+					<span class="text-muted small">-</span>
+					{% endif %}
+				</td>
+				<td>
+					{% if log.ip_address %}
+					<code class="small">{{ log.ip_address }}</code>
+					{% else %}
+					<span class="text-muted small">-</span>
+					{% endif %}
+				</td>
+				<td class="pr-4 details-cell">
+					{% if log.details %}
+					<details>
+						<summary class="small">
+							{% if log.details is mapping %}
+							{% for k, v in log.details.items() %}
+							{% if loop.index <= 2 %}
+							<span class="badge badge-light border">
+								{{ k }}: {{ ((v if v is string else v | tojson) or '') | truncate(22, true) }}
+							</span>
+							{% endif %}
+							{% endfor %}
+							{% if log.details | length > 2 %}
+							<span class="badge badge-light border">+{{ log.details | length - 2 }} more</span>
+							{% endif %}
+							{% else %}
+							<span class="badge badge-light border">view details</span>
+							{% endif %}
+						</summary>
+						<pre class="bg-light border rounded p-2 mt-1 mb-0">{{ log.details | tojson(indent=2) }}</pre>
+					</details>
+					{% else %}
+					<span class="text-muted small">-</span>
+					{% endif %}
+				</td>
+			</tr>
+			{% endfor %}
+			{% else %}
+			<tr>
+				<td colspan="8" class="text-center py-5">
+					<div class="my-3 text-muted opacity-50">
+						<i class="fas fa-clipboard-list fa-3x mb-2"></i>
+					</div>
+					<h5 class="text-muted font-weight-normal">No audit logs found</h5>
+				</td>
+			</tr>
+			{% endif %}
+		</tbody>
+	</table>
+</div>
+
+{% if logs.pages > 1 %}
+<div class="mt-4">
+	<ul class="pagination justify-content-center">
+		{% if logs.has_prev %}
+		<li class="page-item">
+			<a class="page-link shadow-sm"
+				href="{{ url_for('containers_admin.audit_log', page=logs.prev_num, **filters) }}">
+				<i class="fas fa-chevron-left"></i>
+			</a>
+		</li>
+		{% endif %}
+
+		{% for page_num in logs.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+		{% if page_num %}
+		<li class="page-item {{ 'active' if page_num == logs.page }}">
+			<a class="page-link shadow-sm"
+				href="{{ url_for('containers_admin.audit_log', page=page_num, **filters) }}">{{ page_num }}</a>
+		</li>
+		{% else %}
+		<li class="page-item disabled"><span class="page-link">...</span></li>
+		{% endif %}
+		{% endfor %}
+
+		{% if logs.has_next %}
+		<li class="page-item">
+			<a class="page-link shadow-sm"
+				href="{{ url_for('containers_admin.audit_log', page=logs.next_num, **filters) }}">
+				<i class="fas fa-chevron-right"></i>
+			</a>
+		</li>
+		{% endif %}
+	</ul>
+</div>
+{% endif %}
+
+{% include "config/container_status.html" %}
+{% endblock %}

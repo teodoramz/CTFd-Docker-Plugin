@@ -51,26 +51,41 @@ class FlagService:
         if challenge.flag_mode == 'static':
             # Static flag: just prefix + suffix
             return f"{challenge.flag_prefix}{challenge.flag_suffix}"
-            
-        # Random flag
-        length = challenge.random_flag_length or 16
+
+        # Random flag - be defensive about the configured length (it may
+        # arrive as a string from forms/imports, or be 0/None)
+        try:
+            length = int(challenge.random_flag_length or 16)
+        except (TypeError, ValueError):
+            length = 16
+        if length < 1:
+            length = 16
+
         alphabet = string.ascii_letters + string.digits
-        random_part = ''.join(secrets.choice(alphabet) for _ in range(length))
-        
-        # If account_id is provided, append a unique fingerprint based on account + challenge
-        # This ensures TWO users never get the same flag even if they random the same string
+
+        # If account_id is provided, embed a unique fingerprint based on
+        # account + challenge. This ensures TWO accounts never get the same
+        # flag even if they randomly draw the same string (a collision would
+        # trip the anti-cheat and ban an innocent account).
+        #
+        # The fingerprint is embedded INSIDE the requested length, so the
+        # random section is exactly as long as advertised: <ran_8> gives 8
+        # characters (4 random + 4 fingerprint), <ran_16> gives 16 (8 + 8).
+        # Previously the 8-char fingerprint was appended on top, so <ran_8>
+        # silently produced 16 characters.
         if account_id:
             # Use encryption key as salt for HMAC
             salt = self.encryption_key.encode()
             msg = f"{account_id}:{challenge.id}".encode()
-            fingerprint = hmac.new(salt, msg, hashlib.sha256).hexdigest()[:8]
-            
-            # Combine: prefix + random + fingerprint + suffix
-            # We insert the fingerprint before the suffix
-            flag = f"{challenge.flag_prefix}{random_part}{fingerprint}{challenge.flag_suffix}"
+            fingerprint = hmac.new(salt, msg, hashlib.sha256).hexdigest()
+
+            fp_len = min(8, length // 2)
+            random_part = ''.join(secrets.choice(alphabet) for _ in range(length - fp_len))
+            flag = f"{challenge.flag_prefix}{random_part}{fingerprint[:fp_len]}{challenge.flag_suffix}"
         else:
+            random_part = ''.join(secrets.choice(alphabet) for _ in range(length))
             flag = f"{challenge.flag_prefix}{random_part}{challenge.flag_suffix}"
-        
+
         return flag
     
     def encrypt_flag(self, flag: str) -> str:

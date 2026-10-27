@@ -8,5 +8,8 @@
 	<a class="nav-link {% if active_page == 'cheats' %}active{% endif %}" href="{{ url_for('containers_admin.cheats') }}"><i class="fas fa-book"></i> Cheat Logs</a>
 </li>
 <li class="nav-item">
+	<a class="nav-link {% if active_page == 'audit' %}active{% endif %}" href="{{ url_for('containers_admin.audit_log') }}"><i class="fas fa-clipboard-list"></i> Audit Log</a>
+</li>
+<li class="nav-item">
 	<a class="nav-link {% if active_page == 'import' %}active{% endif %}" href="{{ url_for('containers_admin.import_challenges_page') }}"><i class="fas fa-upload"></i> Import</a>
 </li>

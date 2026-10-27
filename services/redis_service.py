@@ -161,9 +161,19 @@ class RedisExpirationService:
             return
         
         try:
-            # Subscribe to keyspace notifications for expired events
+            # Subscribe to keyspace notifications for expired events.
+            # Use the Redis DB index the client is actually connected to -
+            # hardcoding @0 silently breaks expiration if CTFd's REDIS_URL
+            # points at another DB (containers then only die via the 1-minute
+            # backup poller).
+            db_index = 0
+            try:
+                db_index = int(self.redis.connection_pool.connection_kwargs.get('db', 0))
+            except Exception:
+                pass
+
             pubsub = self.redis.pubsub()
-            pubsub.psubscribe('__keyevent@0__:expired')
+            pubsub.psubscribe(f'__keyevent@{db_index}__:expired')
             
             logger.info("Listening for Redis key expirations...")
             
